@@ -18,14 +18,14 @@ class ADNIDataset(Dataset):
     def __init__(self, root_dir='../ADNI', augmentation=False):
         self.root_dir = root_dir
         self.file_names = glob.glob(os.path.join(
-            root_dir, './**/*.nii'), recursive=True)
+            root_dir, './**/*.mgz'), recursive=True)
         self.augmentation = augmentation
 
     def __len__(self):
         return len(self.file_names)
 
     def roi_crop(self, image):
-        image = image[:, :, :, 0]
+        image = image[:, :, :]
         # Mask of non-black pixels (assuming image has a single channel).
         mask = image > 0
 

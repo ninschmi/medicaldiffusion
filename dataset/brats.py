@@ -48,8 +48,8 @@ class BRATSDataset(Dataset):
         path = os.path.join(self.root, img_name)
 
         img = nib.load(os.path.join(
-            path, img_name+'_' + self.imgtype+'.nii.gz'))
-        gt = nib.load(os.path.join(path, img_name + '_' + 'seg.nii.gz'))
+            path, img_name+'_' + self.imgtype+'.nii'))
+        gt = nib.load(os.path.join(path, img_name + '_' + 'seg.nii'))
 
         A = np.zeros((240, 240, 166))
         G = np.zeros((240, 240, 166))

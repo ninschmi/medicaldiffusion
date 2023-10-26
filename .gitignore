@@ -153,5 +153,7 @@ outputs/
 
 .vscode/
 
+.DS_Store
+
 
 
