@@ -87,6 +87,10 @@ class VQGAN(pl.LightningModule):
         self.l1_weight = cfg.model.l1_weight
         self.save_hyperparameters()
 
+        self.accumulate_grad_batches = cfg.model.accumulate_grad_batches
+        self.gradient_clip_val = cfg.model.gradient_clip_val
+        self.automatic_optimization=False
+
     def encode(self, x, include_embeddings=False, quantize=True):
         h = self.pre_vq_conv(self.encoder(x))
         if quantize:
@@ -223,17 +227,42 @@ class VQGAN(pl.LightningModule):
             frames, frames_recon) * self.perceptual_weight
         return recon_loss, x_recon, vq_output, perceptual_loss
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
+    def training_step(self, batch, batch_idx):
+        opt_ae, opt_disc = self.optimizers()
         x = batch['data']
-        if optimizer_idx == 0:
-            recon_loss, _, vq_output, aeloss, perceptual_loss, gan_feat_loss = self.forward(
-                x, optimizer_idx)
-            commitment_loss = vq_output['commitment_loss']
-            loss = recon_loss + commitment_loss + aeloss + perceptual_loss + gan_feat_loss
-        if optimizer_idx == 1:
-            discloss = self.forward(x, optimizer_idx)
-            loss = discloss
-        return loss
+
+        ### Optimize Discriminator
+
+        discloss = self.forward(x, 1)
+        # scale losses by 1/N (for N batches of gradient accumulation)
+        discloss_scaled = discloss / self.accumulate_grad_batches
+
+        self.manual_backward(discloss_scaled)
+
+        # accumulate gradients of N batches
+        if (batch_idx + 1) % self.accumulate_grad_batches == 0:
+            self.clip_gradients(opt_disc, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+            opt_disc.step()
+            opt_disc.zero_grad()
+
+        ### Optimize Autoencoder - the "generator"
+
+        recon_loss, _, vq_output, aeloss, perceptual_loss, gan_feat_loss = self.forward(
+            x, 0)
+        commitment_loss = vq_output['commitment_loss']
+        loss = recon_loss + commitment_loss + aeloss + perceptual_loss + gan_feat_loss
+        # scale losses by 1/N (for N batches of gradient accumulation)
+        loss_scaled = loss / self.accumulate_grad_batches
+
+        self.manual_backward(loss_scaled)
+
+        # accumulate gradients of N batches
+        if (batch_idx + 1) % self.accumulate_grad_batches == 0:
+            self.clip_gradients(opt_ae, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+            opt_ae.step()
+            opt_ae.zero_grad()
+        
+        self.log_dict({"ae_loss": loss, "ae_loss_scaled": loss_scaled, "disc_loss": discloss, "disc_loss_scaled": discloss_scaled}, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         x = batch['data']  # TODO: batch['stft']
@@ -255,7 +284,7 @@ class VQGAN(pl.LightningModule):
         opt_disc = torch.optim.Adam(list(self.image_discriminator.parameters()) +
                                     list(self.video_discriminator.parameters()),
                                     lr=lr, betas=(0.5, 0.9))
-        return [opt_ae, opt_disc], []
+        return opt_ae, opt_disc
 
     def log_images(self, batch, **kwargs):
         log = dict()

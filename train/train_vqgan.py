@@ -69,24 +69,28 @@ def run(cfg: DictConfig):
                 print('will start from the recent ckpt %s' %
                       cfg.model.resume_from_checkpoint)
 
-    accelerator = None
-    if cfg.model.gpus > 1:
-        accelerator = 'ddp'
+    accelerator = 'auto'
+    strategy = 'auto'
+    devices = 'auto'
+    if cfg.model.gpus > 0:
+        accelerator = 'gpu'
+        devices=cfg.model.gpus
+        if cfg.model.gpus > 1:
+            strategy = 'ddp'
 
     trainer = pl.Trainer(
-        gpus=cfg.model.gpus,
+        devices=devices,
         accumulate_grad_batches=cfg.model.accumulate_grad_batches,
         default_root_dir=cfg.model.default_root_dir,
-        resume_from_checkpoint=cfg.model.resume_from_checkpoint,
         callbacks=callbacks,
         max_steps=cfg.model.max_steps,
         max_epochs=cfg.model.max_epochs,
         precision=cfg.model.precision,
-        gradient_clip_val=cfg.model.gradient_clip_val,
         accelerator=accelerator,
+        strategy=strategy
     )
 
-    trainer.fit(model, train_dataloader, val_dataloader)
+    trainer.fit(model, train_dataloader, val_dataloader, ckpt_path=cfg.model.resume_from_checkpoint)
 
 
 if __name__ == '__main__':
