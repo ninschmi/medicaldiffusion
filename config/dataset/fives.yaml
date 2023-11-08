@@ -1,0 +1,3 @@
+name: FIVES
+root_dir: /data/FIVES/
+image_channels: 1

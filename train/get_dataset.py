@@ -1,5 +1,6 @@
-from dataset import MRNetDataset, BRATSDataset, ADNIDataset, DUKEDataset, LIDCDataset, DEFAULTDataset
+from dataset import MRNetDataset, BRATSDataset, ADNIDataset, DUKEDataset, LIDCDataset, FIVESDataset, DEFAULTDataset
 from torch.utils.data import WeightedRandomSampler
+import os
 
 
 def get_dataset(cfg):
@@ -39,6 +40,12 @@ def get_dataset(cfg):
             root_dir=cfg.dataset.root_dir, augmentation=True)
         sampler = None
         return train_dataset, val_dataset, sampler
+    if cfg.dataset.name == 'FIVES':
+        train_dataset = FIVESDataset(
+            root_dir=os.path.join(cfg.dataset.root_dir, "train/"))
+        val_dataset = FIVESDataset(
+            root_dir=os.path.join(cfg.dataset.root_dir, "train/"))
+        sampler = None
     if cfg.dataset.name == 'DEFAULT':
         train_dataset = DEFAULTDataset(
             root_dir=cfg.dataset.root_dir)
