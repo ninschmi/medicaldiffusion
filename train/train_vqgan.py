@@ -10,6 +10,7 @@ from train.callbacks import ImageLogger, VideoLogger
 from train.get_dataset import get_dataset
 import hydra
 from omegaconf import DictConfig, open_dict
+from pytorch_lightning.strategies import DDPStrategy
 
 
 @hydra.main(config_path='../config', config_name='base_cfg', version_base=None)
@@ -76,7 +77,9 @@ def run(cfg: DictConfig):
         accelerator = 'gpu'
         devices=cfg.model.gpus
         if cfg.model.gpus > 1:
-            strategy = 'ddp'
+            # Explicitly specify the process group backend if you choose to
+            ddp = DDPStrategy(process_group_backend="gloo")
+            strategy = ddp
 
     trainer = pl.Trainer(
         devices=devices,
