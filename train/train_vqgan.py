@@ -5,7 +5,8 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 from ddpm.diffusion import default
-from vq_gan_3d.model import VQGAN
+from vq_gan_3d.model import VQGAN3D
+from vq_gan_2d.model import VQGAN2D
 from train.callbacks import ImageLogger, VideoLogger
 from train.get_dataset import get_dataset
 import hydra
@@ -33,7 +34,10 @@ def run(cfg: DictConfig):
     print("Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus/8) * {} (batchsize/4) * {:.2e} (base_lr)".format(
         cfg.model.lr, accumulate, ngpu/8, bs/4, base_lr))
 
-    model = VQGAN(cfg)
+    if cfg.dataset.name == 'FIVES':
+        model = VQGAN2D(cfg)
+    else:
+        model = VQGAN3D(cfg)
 
     callbacks = []
     callbacks.append(ModelCheckpoint(monitor='val/recon_loss',
@@ -49,26 +53,26 @@ def run(cfg: DictConfig):
 
     # load the most recent checkpoint file
     base_dir = os.path.join(cfg.model.default_root_dir, 'lightning_logs')
-    if os.path.exists(base_dir):
-        log_folder = ckpt_file = ''
-        version_id_used = step_used = 0
-        for folder in os.listdir(base_dir):
-            version_id = int(folder.split('_')[1])
-            if version_id > version_id_used:
-                version_id_used = version_id
-                log_folder = folder
-        if len(log_folder) > 0:
-            ckpt_folder = os.path.join(base_dir, log_folder, 'checkpoints')
-            for fn in os.listdir(ckpt_folder):
-                if fn == 'latest_checkpoint.ckpt':
-                    ckpt_file = 'latest_checkpoint_prev.ckpt'
-                    os.rename(os.path.join(ckpt_folder, fn),
-                              os.path.join(ckpt_folder, ckpt_file))
-            if len(ckpt_file) > 0:
-                cfg.model.resume_from_checkpoint = os.path.join(
-                    ckpt_folder, ckpt_file)
-                print('will start from the recent ckpt %s' %
-                      cfg.model.resume_from_checkpoint)
+    #if os.path.exists(base_dir):
+    #    log_folder = ckpt_file = ''
+    #    version_id_used = step_used = 0
+    #    for folder in os.listdir(base_dir):
+    #        version_id = int(folder.split('_')[1])
+    #        if version_id > version_id_used:
+    #            version_id_used = version_id
+    #            log_folder = folder
+    #    if len(log_folder) > 0:
+    #        ckpt_folder = os.path.join(base_dir, log_folder, 'checkpoints')
+    #        for fn in os.listdir(ckpt_folder):
+    #            if fn == 'latest_checkpoint.ckpt':
+    #                ckpt_file = 'latest_checkpoint_prev.ckpt'
+    #                os.rename(os.path.join(ckpt_folder, fn),
+    #                          os.path.join(ckpt_folder, ckpt_file))
+    #        if len(ckpt_file) > 0:
+    #            cfg.model.resume_from_checkpoint = os.path.join(
+    #                ckpt_folder, ckpt_file)
+    #            print('will start from the recent ckpt %s' %
+    #                  cfg.model.resume_from_checkpoint)
 
     accelerator = 'auto'
     strategy = 'auto'

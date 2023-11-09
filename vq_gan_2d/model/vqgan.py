@@ -12,9 +12,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from vq_gan_3d.utils import shift_dim, adopt_weight, comp_getattr
-from vq_gan_3d.model.lpips import LPIPS
-from vq_gan_3d.model.codebook import Codebook
+from vq_gan_2d.utils import shift_dim, adopt_weight, comp_getattr
+from vq_gan_2d.model.lpips import LPIPS
+from vq_gan_2d.model.codebook import Codebook
 
 
 def silu(x):
@@ -43,7 +43,7 @@ def vanilla_d_loss(logits_real, logits_fake):
     return d_loss
 
 
-class VQGAN3D(pl.LightningModule):
+class VQGAN2D(pl.LightningModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -57,9 +57,9 @@ class VQGAN3D(pl.LightningModule):
         self.decoder = Decoder(
             cfg.model.n_hiddens, cfg.model.downsample, cfg.dataset.image_channels, cfg.model.norm_type, cfg.model.num_groups)
         self.enc_out_ch = self.encoder.out_channels
-        self.pre_vq_conv = SamePadConv3d(
+        self.pre_vq_conv = SamePadConv2d(
             self.enc_out_ch, cfg.model.embedding_dim, 1, padding_type=cfg.model.padding_type)
-        self.post_vq_conv = SamePadConv3d(
+        self.post_vq_conv = SamePadConv2d(
             cfg.model.embedding_dim, self.enc_out_ch, 1)
 
         self.codebook = Codebook(cfg.model.n_codes, cfg.model.embedding_dim,
@@ -69,8 +69,6 @@ class VQGAN3D(pl.LightningModule):
         # TODO: Changed batchnorm from sync to normal
         self.image_discriminator = NLayerDiscriminator(
             cfg.dataset.image_channels, cfg.model.disc_channels, cfg.model.disc_layers, norm_layer=nn.BatchNorm2d)
-        self.video_discriminator = NLayerDiscriminator3D(
-            cfg.dataset.image_channels, cfg.model.disc_channels, cfg.model.disc_layers, norm_layer=nn.BatchNorm3d)
 
         if cfg.model.disc_loss_type == 'vanilla':
             self.disc_loss = vanilla_d_loss
@@ -80,7 +78,6 @@ class VQGAN3D(pl.LightningModule):
         self.perceptual_model = LPIPS().eval()
 
         self.image_gan_weight = cfg.model.image_gan_weight
-        self.video_gan_weight = cfg.model.video_gan_weight
 
         self.perceptual_weight = cfg.model.perceptual_weight
 
@@ -110,7 +107,7 @@ class VQGAN3D(pl.LightningModule):
         return self.decoder(h)
 
     def forward(self, x, optimizer_idx=None, log_image=False):
-        B, C, T, H, W = x.shape
+        B, C, H, W = x.shape
 
         z = self.pre_vq_conv(self.encoder(x))
         vq_output = self.codebook(z)
@@ -119,11 +116,9 @@ class VQGAN3D(pl.LightningModule):
         recon_loss = F.l1_loss(x_recon, x) * self.l1_weight
 
         # Selects one random 2D image from each 3D Image
-        frame_idx = torch.randint(0, T, [B]).cuda()
-        frame_idx_selected = frame_idx.reshape(-1,
-                                               1, 1, 1, 1).repeat(1, C, 1, H, W)
-        frames = torch.gather(x, 2, frame_idx_selected).squeeze(2)
-        frames_recon = torch.gather(x_recon, 2, frame_idx_selected).squeeze(2)
+       
+        frames = torch.gather(x, 2, 0).squeeze(2)
+        frames_recon = torch.gather(x_recon, 2, 0).squeeze(2)
 
         if log_image:
             return frames, frames_recon, x, x_recon
@@ -140,18 +135,14 @@ class VQGAN3D(pl.LightningModule):
             # Discriminator loss (turned on after a certain epoch)
             logits_image_fake, pred_image_fake = self.image_discriminator(
                 frames_recon)
-            logits_video_fake, pred_video_fake = self.video_discriminator(
-                x_recon)
             g_image_loss = -torch.mean(logits_image_fake)
-            g_video_loss = -torch.mean(logits_video_fake)
-            g_loss = self.image_gan_weight*g_image_loss + self.video_gan_weight*g_video_loss
+            g_loss = self.image_gan_weight*g_image_loss
             disc_factor = adopt_weight(
                 self.global_step, threshold=self.cfg.model.discriminator_iter_start)
             aeloss = disc_factor * g_loss
 
             # GAN feature matching loss - tune features such that we get the same prediction result on the discriminator
             image_gan_feat_loss = 0
-            video_gan_feat_loss = 0
             feat_weights = 4.0 / (3 + 1)
             if self.image_gan_weight > 0:
                 logits_image_real, pred_image_real = self.image_discriminator(
@@ -160,23 +151,12 @@ class VQGAN3D(pl.LightningModule):
                     image_gan_feat_loss += feat_weights * \
                         F.l1_loss(pred_image_fake[i], pred_image_real[i].detach(
                         )) * (self.image_gan_weight > 0)
-            if self.video_gan_weight > 0:
-                logits_video_real, pred_video_real = self.video_discriminator(
-                    x)
-                for i in range(len(pred_video_fake)-1):
-                    video_gan_feat_loss += feat_weights * \
-                        F.l1_loss(pred_video_fake[i], pred_video_real[i].detach(
-                        )) * (self.video_gan_weight > 0)
             gan_feat_loss = disc_factor * self.gan_feat_weight * \
-                (image_gan_feat_loss + video_gan_feat_loss)
+                (image_gan_feat_loss)
 
             self.log("train/g_image_loss", g_image_loss,
                      logger=True, on_step=True, on_epoch=True)
-            self.log("train/g_video_loss", g_video_loss,
-                     logger=True, on_step=True, on_epoch=True)
             self.log("train/image_gan_feat_loss", image_gan_feat_loss,
-                     logger=True, on_step=True, on_epoch=True)
-            self.log("train/video_gan_feat_loss", video_gan_feat_loss,
                      logger=True, on_step=True, on_epoch=True)
             self.log("train/perceptual_loss", perceptual_loss,
                      prog_bar=True, logger=True, on_step=True, on_epoch=True)
@@ -193,31 +173,21 @@ class VQGAN3D(pl.LightningModule):
         if optimizer_idx == 1:
             # Train discriminator
             logits_image_real, _ = self.image_discriminator(frames.detach())
-            logits_video_real, _ = self.video_discriminator(x.detach())
 
             logits_image_fake, _ = self.image_discriminator(
                 frames_recon.detach())
-            logits_video_fake, _ = self.video_discriminator(x_recon.detach())
 
             d_image_loss = self.disc_loss(logits_image_real, logits_image_fake)
-            d_video_loss = self.disc_loss(logits_video_real, logits_video_fake)
             disc_factor = adopt_weight(
                 self.global_step, threshold=self.cfg.model.discriminator_iter_start)
             discloss = disc_factor * \
-                (self.image_gan_weight*d_image_loss +
-                 self.video_gan_weight*d_video_loss)
+                (self.image_gan_weight*d_image_loss)
 
             self.log("train/logits_image_real", logits_image_real.mean().detach(),
                      logger=True, on_step=True, on_epoch=True)
             self.log("train/logits_image_fake", logits_image_fake.mean().detach(),
                      logger=True, on_step=True, on_epoch=True)
-            self.log("train/logits_video_real", logits_video_real.mean().detach(),
-                     logger=True, on_step=True, on_epoch=True)
-            self.log("train/logits_video_fake", logits_video_fake.mean().detach(),
-                     logger=True, on_step=True, on_epoch=True)
             self.log("train/d_image_loss", d_image_loss,
-                     logger=True, on_step=True, on_epoch=True)
-            self.log("train/d_video_loss", d_video_loss,
                      logger=True, on_step=True, on_epoch=True)
             self.log("train/discloss", discloss, prog_bar=True,
                      logger=True, on_step=True, on_epoch=True)
@@ -281,8 +251,7 @@ class VQGAN3D(pl.LightningModule):
                                   list(self.post_vq_conv.parameters()) +
                                   list(self.codebook.parameters()),
                                   lr=lr, betas=(0.5, 0.9))
-        opt_disc = torch.optim.Adam(list(self.image_discriminator.parameters()) +
-                                    list(self.video_discriminator.parameters()),
+        opt_disc = torch.optim.Adam(list(self.image_discriminator.parameters()),
                                     lr=lr, betas=(0.5, 0.9))
         return opt_ae, opt_disc
 
@@ -296,17 +265,6 @@ class VQGAN3D(pl.LightningModule):
         #log['mean_org'] = batch['mean_org']
         #log['std_org'] = batch['std_org']
         return log
-
-    def log_videos(self, batch, **kwargs):
-        log = dict()
-        x = batch['data']
-        _, _, x, x_rec = self(x, log_image=True)
-        log["inputs"] = x
-        log["reconstructions"] = x_rec
-        #log['mean_org'] = batch['mean_org']
-        #log['std_org'] = batch['std_org']
-        return log
-
 
 def Normalize(in_channels, norm_type='group', num_groups=32):
     assert norm_type in ['group', 'batch']
@@ -324,7 +282,7 @@ class Encoder(nn.Module):
         self.conv_blocks = nn.ModuleList()
         max_ds = n_times_downsample.max()
 
-        self.conv_first = SamePadConv3d(
+        self.conv_first = SamePadConv2d(
             image_channel, n_hiddens, kernel_size=3, padding_type=padding_type)
 
         for i in range(max_ds):
@@ -332,7 +290,7 @@ class Encoder(nn.Module):
             in_channels = n_hiddens * 2**i
             out_channels = n_hiddens * 2**(i+1)
             stride = tuple([2 if d > 0 else 1 for d in n_times_downsample])
-            block.down = SamePadConv3d(
+            block.down = SamePadConv2d(
                 in_channels, out_channels, 4, stride=stride, padding_type=padding_type)
             block.res = ResBlock(
                 out_channels, out_channels, norm_type=norm_type, num_groups=num_groups)
@@ -374,7 +332,7 @@ class Decoder(nn.Module):
             in_channels = in_channels if i == 0 else n_hiddens*2**(max_us-i+1)
             out_channels = n_hiddens*2**(max_us-i)
             us = tuple([2 if d > 0 else 1 for d in n_times_upsample])
-            block.up = SamePadConvTranspose3d(
+            block.up = SamePadConvTranspose2d(
                 in_channels, out_channels, 4, stride=us)
             block.res1 = ResBlock(
                 out_channels, out_channels, norm_type=norm_type, num_groups=num_groups)
@@ -383,7 +341,7 @@ class Decoder(nn.Module):
             self.conv_blocks.append(block)
             n_times_upsample -= 1
 
-        self.conv_last = SamePadConv3d(
+        self.conv_last = SamePadConv2d(
             out_channels, image_channel, kernel_size=3)
 
     def forward(self, x):
@@ -405,14 +363,14 @@ class ResBlock(nn.Module):
         self.use_conv_shortcut = conv_shortcut
 
         self.norm1 = Normalize(in_channels, norm_type, num_groups=num_groups)
-        self.conv1 = SamePadConv3d(
+        self.conv1 = SamePadConv2d(
             in_channels, out_channels, kernel_size=3, padding_type=padding_type)
         self.dropout = torch.nn.Dropout(dropout)
         self.norm2 = Normalize(in_channels, norm_type, num_groups=num_groups)
-        self.conv2 = SamePadConv3d(
+        self.conv2 = SamePadConv2d(
             out_channels, out_channels, kernel_size=3, padding_type=padding_type)
         if self.in_channels != self.out_channels:
-            self.conv_shortcut = SamePadConv3d(
+            self.conv_shortcut = SamePadConv2d(
                 in_channels, out_channels, kernel_size=3, padding_type=padding_type)
 
     def forward(self, x):
@@ -431,13 +389,13 @@ class ResBlock(nn.Module):
 
 
 # Does not support dilation
-class SamePadConv3d(nn.Module):
+class SamePadConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, bias=True, padding_type='replicate'):
         super().__init__()
         if isinstance(kernel_size, int):
-            kernel_size = (kernel_size,) * 3
+            kernel_size = (kernel_size,) * 2
         if isinstance(stride, int):
-            stride = (stride,) * 3
+            stride = (stride,) * 2
 
         # assumes that the input shape is divisible by stride
         total_pad = tuple([k - s for k, s in zip(kernel_size, stride)])
@@ -448,20 +406,20 @@ class SamePadConv3d(nn.Module):
         self.pad_input = pad_input
         self.padding_type = padding_type
 
-        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size,
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
                               stride=stride, padding=0, bias=bias)
 
     def forward(self, x):
         return self.conv(F.pad(x, self.pad_input, mode=self.padding_type))
 
 
-class SamePadConvTranspose3d(nn.Module):
+class SamePadConvTranspose2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, bias=True, padding_type='replicate'):
         super().__init__()
         if isinstance(kernel_size, int):
-            kernel_size = (kernel_size,) * 3
+            kernel_size = (kernel_size,) * 2
         if isinstance(stride, int):
-            stride = (stride,) * 3
+            stride = (stride,) * 2
 
         total_pad = tuple([k - s for k, s in zip(kernel_size, stride)])
         pad_input = []
@@ -471,7 +429,7 @@ class SamePadConvTranspose3d(nn.Module):
         self.pad_input = pad_input
         self.padding_type = padding_type
 
-        self.convt = nn.ConvTranspose3d(in_channels, out_channels, kernel_size,
+        self.convt = nn.ConvTranspose2d(in_channels, out_channels, kernel_size,
                                         stride=stride, bias=bias,
                                         padding=tuple([k - 1 for k in kernel_size]))
 
@@ -509,60 +467,6 @@ class NLayerDiscriminator(nn.Module):
         ]]
 
         sequence += [[nn.Conv2d(nf, 1, kernel_size=kw,
-                                stride=1, padding=padw)]]
-
-        if use_sigmoid:
-            sequence += [[nn.Sigmoid()]]
-
-        if getIntermFeat:
-            for n in range(len(sequence)):
-                setattr(self, 'model'+str(n), nn.Sequential(*sequence[n]))
-        else:
-            sequence_stream = []
-            for n in range(len(sequence)):
-                sequence_stream += sequence[n]
-            self.model = nn.Sequential(*sequence_stream)
-
-    def forward(self, input):
-        if self.getIntermFeat:
-            res = [input]
-            for n in range(self.n_layers+2):
-                model = getattr(self, 'model'+str(n))
-                res.append(model(res[-1]))
-            return res[-1], res[1:]
-        else:
-            return self.model(input), _
-
-
-class NLayerDiscriminator3D(nn.Module):
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.SyncBatchNorm, use_sigmoid=False, getIntermFeat=True):
-        super(NLayerDiscriminator3D, self).__init__()
-        self.getIntermFeat = getIntermFeat
-        self.n_layers = n_layers
-
-        kw = 4
-        padw = int(np.ceil((kw-1.0)/2))
-        sequence = [[nn.Conv3d(input_nc, ndf, kernel_size=kw,
-                               stride=2, padding=padw), nn.LeakyReLU(0.2, True)]]
-
-        nf = ndf
-        for n in range(1, n_layers):
-            nf_prev = nf
-            nf = min(nf * 2, 512)
-            sequence += [[
-                nn.Conv3d(nf_prev, nf, kernel_size=kw, stride=2, padding=padw),
-                norm_layer(nf), nn.LeakyReLU(0.2, True)
-            ]]
-
-        nf_prev = nf
-        nf = min(nf * 2, 512)
-        sequence += [[
-            nn.Conv3d(nf_prev, nf, kernel_size=kw, stride=1, padding=padw),
-            norm_layer(nf),
-            nn.LeakyReLU(0.2, True)
-        ]]
-
-        sequence += [[nn.Conv3d(nf, 1, kernel_size=kw,
                                 stride=1, padding=padw)]]
 
         if use_sigmoid:

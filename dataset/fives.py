@@ -26,7 +26,7 @@ class FIVESDataset(Dataset):
     def get_data_files(self):
         folder_name = os.path.join(self.root_dir, "Original/")
         file_names = [os.path.join(
-            folder_name, file_name) for file_name in os.listdir(folder_name) if file_name.endsiwth('.png')]
+            folder_name, file_name) for file_name in os.listdir(folder_name) if file_name.endswith('.png')]
         return file_names
 
     def __len__(self):
@@ -36,4 +36,4 @@ class FIVESDataset(Dataset):
         img = tio.ScalarImage(self.file_paths[idx])
         img = self.preprocessing(img)
         img = self.transforms(img)
-        return {'data': img.data.permute(0, -1, 1, 2)}
+        return {'data': img.data.permute(0, -1, 1, 2).squeeze(dim=1)}

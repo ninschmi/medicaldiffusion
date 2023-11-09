@@ -46,6 +46,7 @@ def get_dataset(cfg):
         val_dataset = FIVESDataset(
             root_dir=os.path.join(cfg.dataset.root_dir, "train/"))
         sampler = None
+        return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'DEFAULT':
         train_dataset = DEFAULTDataset(
             root_dir=cfg.dataset.root_dir)
