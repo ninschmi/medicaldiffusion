@@ -117,8 +117,8 @@ class VQGAN2D(pl.LightningModule):
 
         # Selects one random 2D image from each 3D Image
        
-        frames = torch.gather(x, 2, 0).squeeze(2)
-        frames_recon = torch.gather(x_recon, 2, 0).squeeze(2)
+        frames = x
+        frames_recon = x_recon
 
         if log_image:
             return frames, frames_recon, x, x_recon

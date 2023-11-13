@@ -49,8 +49,7 @@ class ADNIDataset(Dataset):
     def __getitem__(self, index):
         path = self.file_names[index]
         img = nib.load(path)
-
-        img = np.swapaxes(img.get_data(), 1, 2)
+        img = np.swapaxes(np.asanyarray(img.dataobj), 1, 2)
         img = np.flip(img, 1)
         img = np.flip(img, 2)
         img = self.roi_crop(image=img)
