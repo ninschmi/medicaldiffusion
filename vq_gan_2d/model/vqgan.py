@@ -47,6 +47,7 @@ class VQGAN2D(pl.LightningModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.extended = cfg.model.extended
         self.embedding_dim = cfg.model.embedding_dim
         self.n_codes = cfg.model.n_codes
 
@@ -55,7 +56,8 @@ class VQGAN2D(pl.LightningModule):
                                cfg.model.num_groups,
                                )
         self.decoder = Decoder(
-            cfg.model.n_hiddens, cfg.model.downsample, cfg.dataset.image_channels, cfg.model.norm_type, cfg.model.num_groups)
+            cfg.model.n_hiddens, cfg.model.downsample, cfg.dataset.image_channels, cfg.model.norm_type, cfg.model.num_groups,
+            self.extended)
         self.enc_out_ch = self.encoder.out_channels
         self.pre_vq_conv = SamePadConv2d(
             self.enc_out_ch, cfg.model.embedding_dim, 1, padding_type=cfg.model.padding_type)
@@ -69,6 +71,10 @@ class VQGAN2D(pl.LightningModule):
         # TODO: Changed batchnorm from sync to normal
         self.image_discriminator = NLayerDiscriminator(
             cfg.dataset.image_channels, cfg.model.disc_channels, cfg.model.disc_layers, norm_layer=nn.BatchNorm2d)
+        
+        if self.extended:
+            self.mask_discriminator = NLayerDiscriminator(
+                cfg.dataset.image_channels, cfg.model.disc_channels, cfg.model.disc_layers, norm_layer=nn.BatchNorm2d)
 
         if cfg.model.disc_loss_type == 'vanilla':
             self.disc_loss = vanilla_d_loss
@@ -106,31 +112,47 @@ class VQGAN2D(pl.LightningModule):
         h = self.post_vq_conv(shift_dim(h, -1, 1))
         return self.decoder(h)
 
-    def forward(self, x, optimizer_idx=None, log_image=False):
+    def forward(self, x, mask=None, optimizer_idx=None, log_image=False):
         B, C, H, W = x.shape
 
         z = self.pre_vq_conv(self.encoder(x))
         vq_output = self.codebook(z)
-        x_recon = self.decoder(self.post_vq_conv(vq_output['embeddings']))
+        x_recon = torch.unsqueeze(self.decoder(self.post_vq_conv(vq_output['embeddings']))[:,0], dim=1)
 
-        recon_loss = F.l1_loss(x_recon, x) * self.l1_weight
+        recon_loss_image = F.l1_loss(x_recon, x) * self.l1_weight
+        recon_loss = recon_loss_image.clone()
 
         # Selects one random 2D image from each 3D Image
        
         frames = x
         frames_recon = x_recon
 
+        mask_recon = None
+        if self.extended:
+            mask_recon = torch.unsqueeze(self.decoder(self.post_vq_conv(vq_output['embeddings']))[:,1], dim=1)
+
+            recon_loss_mask = F.l1_loss(mask_recon, mask) * self.l1_weight
+            recon_loss += recon_loss_mask.clone()
+        
+            frames_mask = mask
+            frames_recon_mask = mask_recon
+
         if log_image:
-            return frames, frames_recon, x, x_recon
+            return x, x_recon, mask, mask_recon
 
         if optimizer_idx == 0:
             # Autoencoder - train the "generator"
 
             # Perceptual loss
-            perceptual_loss = 0
+            perceptual_loss = perceptual_loss_image = perceptual_loss_mask = 0
             if self.perceptual_weight > 0:
-                perceptual_loss = self.perceptual_model(
+                perceptual_loss_image = self.perceptual_model(
                     frames, frames_recon).mean() * self.perceptual_weight
+                perceptual_loss = perceptual_loss_image.clone()
+                if self.extended:
+                    perceptual_loss_mask = self.perceptual_model(
+                    frames_mask, frames_recon_mask).mean() * self.perceptual_weight
+                    perceptual_loss += perceptual_loss_mask.clone()
 
             # Discriminator loss (turned on after a certain epoch)
             logits_image_fake, pred_image_fake = self.image_discriminator(
@@ -139,20 +161,37 @@ class VQGAN2D(pl.LightningModule):
             g_loss = self.image_gan_weight*g_image_loss
             disc_factor = adopt_weight(
                 self.global_step, threshold=self.cfg.model.discriminator_iter_start)
-            aeloss = disc_factor * g_loss
+            aeloss_image = disc_factor * g_loss
+            aeloss = aeloss_image.clone()
+
+            if self.extended:
+                logits_mask_fake, pred_mask_fake = self.mask_discriminator(
+                frames_recon_mask)
+                g_mask_loss = -torch.mean(logits_mask_fake)
+                g_loss_mask = self.image_gan_weight*g_mask_loss
+                aeloss_mask = disc_factor * g_loss_mask
+                aeloss += aeloss_mask.clone()
 
             # GAN feature matching loss - tune features such that we get the same prediction result on the discriminator
             image_gan_feat_loss = 0
+            mask_gan_feat_loss = 0
             feat_weights = 4.0 / (3 + 1)
             if self.image_gan_weight > 0:
                 logits_image_real, pred_image_real = self.image_discriminator(
                     frames)
+                if self.extended:
+                    logits_mask_real, pred_mask_real = self.mask_discriminator(
+                    frames_mask)
                 for i in range(len(pred_image_fake)-1):
                     image_gan_feat_loss += feat_weights * \
                         F.l1_loss(pred_image_fake[i], pred_image_real[i].detach(
                         )) * (self.image_gan_weight > 0)
+                    if self.extended:
+                        mask_gan_feat_loss += feat_weights * \
+                            F.l1_loss(pred_mask_fake[i], pred_mask_real[i].detach(
+                            )) * (self.image_gan_weight > 0)
             gan_feat_loss = disc_factor * self.gan_feat_weight * \
-                (image_gan_feat_loss)
+                (image_gan_feat_loss + mask_gan_feat_loss)
 
             self.log("train/g_image_loss", g_image_loss,
                      logger=True, on_step=True, on_epoch=True)
@@ -168,6 +207,23 @@ class VQGAN2D(pl.LightningModule):
                      prog_bar=True, logger=True, on_step=True, on_epoch=True)
             self.log('train/perplexity', vq_output['perplexity'],
                      prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            if self.extended:
+                self.log("train/g_mask_loss", g_mask_loss,
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/mask_gan_feat_loss", mask_gan_feat_loss,
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/perceptual_loss_image", perceptual_loss_image,
+                     prog_bar=True, logger=True, on_step=True, on_epoch=True)
+                self.log("train/perceptual_loss_mask", perceptual_loss_mask,
+                     prog_bar=True, logger=True, on_step=True, on_epoch=True)
+                self.log("train/recon_loss_image", recon_loss_image, prog_bar=True,
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/recon_loss_mask", recon_loss_mask, prog_bar=True,
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/aeloss_image", aeloss_image, prog_bar=True,
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/aeloss_mask", aeloss_mask, prog_bar=True,
+                     logger=True, on_step=True, on_epoch=True)
             return recon_loss, x_recon, vq_output, aeloss, perceptual_loss, gan_feat_loss
 
         if optimizer_idx == 1:
@@ -180,8 +236,9 @@ class VQGAN2D(pl.LightningModule):
             d_image_loss = self.disc_loss(logits_image_real, logits_image_fake)
             disc_factor = adopt_weight(
                 self.global_step, threshold=self.cfg.model.discriminator_iter_start)
-            discloss = disc_factor * \
+            discloss_image = disc_factor * \
                 (self.image_gan_weight*d_image_loss)
+            discloss = discloss_image.clone()
 
             self.log("train/logits_image_real", logits_image_real.mean().detach(),
                      logger=True, on_step=True, on_epoch=True)
@@ -191,19 +248,50 @@ class VQGAN2D(pl.LightningModule):
                      logger=True, on_step=True, on_epoch=True)
             self.log("train/discloss", discloss, prog_bar=True,
                      logger=True, on_step=True, on_epoch=True)
+            if self.extended:
+                logits_mask_real, _ = self.mask_discriminator(frames_mask.detach())
+
+                logits_mask_fake, _ = self.mask_discriminator(
+                frames_recon_mask.detach())
+
+                d_mask_loss = self.disc_loss(logits_mask_real, logits_mask_fake)
+                discloss_mask = disc_factor * \
+                    (self.image_gan_weight*d_mask_loss)
+                discloss += discloss_mask.clone()
+
+                self.log("train/logits_mask_real", logits_mask_real.mean().detach(),
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/logits_mask_fake", logits_mask_fake.mean().detach(),
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/d_mask_loss", d_mask_loss,
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/discloss_image", discloss_image, prog_bar=True,
+                     logger=True, on_step=True, on_epoch=True)
+                self.log("train/discloss_mask", discloss_mask, prog_bar=True,
+                     logger=True, on_step=True, on_epoch=True)
+                return discloss
             return discloss
 
-        perceptual_loss = self.perceptual_model(
+        perceptual_loss_image = self.perceptual_model(
             frames, frames_recon) * self.perceptual_weight
+        perceptual_loss = perceptual_loss_image.clone()
+        if self.extended:
+            perceptual_loss_mask = self.perceptual_model(
+                frames_mask, frames_recon_mask) * self.perceptual_weight
+            perceptual_loss += perceptual_loss_mask.clone()
+            return recon_loss, x_recon, vq_output, perceptual_loss, recon_loss_image, recon_loss_mask, perceptual_loss_image, perceptual_loss_mask
         return recon_loss, x_recon, vq_output, perceptual_loss
 
     def training_step(self, batch, batch_idx):
         opt_ae, opt_disc = self.optimizers()
         x = batch['data']
+        y = None
+        if self.extended:
+            y = batch['target'].to(torch.float16)
 
         ### Optimize Discriminator
 
-        discloss = self.forward(x, 1)
+        discloss = self.forward(x, y, 1)
         # scale losses by 1/N (for N batches of gradient accumulation)
         discloss_scaled = discloss / self.accumulate_grad_batches
 
@@ -218,7 +306,7 @@ class VQGAN2D(pl.LightningModule):
         ### Optimize Autoencoder - the "generator"
 
         recon_loss, _, vq_output, aeloss, perceptual_loss, gan_feat_loss = self.forward(
-            x, 0)
+            x, y, 0)
         commitment_loss = vq_output['commitment_loss']
         loss = recon_loss + commitment_loss + aeloss + perceptual_loss + gan_feat_loss
         # scale losses by 1/N (for N batches of gradient accumulation)
@@ -232,13 +320,23 @@ class VQGAN2D(pl.LightningModule):
             opt_ae.step()
             opt_ae.zero_grad()
         
-        self.log_dict({"ae_loss": loss, "ae_loss_scaled": loss_scaled, "disc_loss": discloss, "disc_loss_scaled": discloss_scaled}, prog_bar=True)
+        self.log_dict({"loss": loss, "loss_scaled": loss_scaled, "disc_loss": discloss, "disc_loss_scaled": discloss_scaled}, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         x = batch['data']  # TODO: batch['stft']
-        recon_loss, _, vq_output, perceptual_loss = self.forward(x)
+        y = None
+        if self.extended:
+            y = batch['target'].to(torch.float16)
+            recon_loss, _, vq_output, perceptual_loss, recon_loss_image, recon_loss_mask, perceptual_loss_image, perceptual_loss_mask = self.forward(x, y)
+            self.log('val/recon_loss_image', recon_loss_image, prog_bar=True)
+            self.log('val/recon_loss_mask', recon_loss_mask, prog_bar=True)
+            self.log('val/perceptual_loss_image', perceptual_loss_image.mean(), prog_bar=True)
+            self.log('val/perceptual_loss_mask', perceptual_loss_mask.mean(), prog_bar=True)
+        else:
+            recon_loss, _, vq_output, perceptual_loss = self.forward(x)
+
         self.log('val/recon_loss', recon_loss, prog_bar=True)
-        self.log('val/perceptual_loss', perceptual_loss, prog_bar=True)
+        self.log('val/perceptual_loss', perceptual_loss.mean(), prog_bar=True)
         self.log('val/perplexity', vq_output['perplexity'], prog_bar=True)
         self.log('val/commitment_loss',
                  vq_output['commitment_loss'], prog_bar=True)
@@ -251,17 +349,26 @@ class VQGAN2D(pl.LightningModule):
                                   list(self.post_vq_conv.parameters()) +
                                   list(self.codebook.parameters()),
                                   lr=lr, betas=(0.5, 0.9))
-        opt_disc = torch.optim.Adam(list(self.image_discriminator.parameters()),
-                                    lr=lr, betas=(0.5, 0.9))
+        opt_disc_param_list = list(self.image_discriminator.parameters())
+                                    
+        if self.extended:
+            opt_disc_param_list = opt_disc_param_list + list(self.mask_discriminator.parameters())
+        opt_disc = torch.optim.Adam(opt_disc_param_list , lr=lr, betas=(0.5, 0.9))
         return opt_ae, opt_disc
 
     def log_images(self, batch, **kwargs):
         log = dict()
         x = batch['data']
         x = x.to(self.device)
-        frames, frames_rec, _, _ = self(x, log_image=True)
+        y = None
+        if self.extended:
+            y = batch['target'].to(torch.float16)
+        frames, frames_rec, mask, mask_rec = self(x, y, log_image=True)
         log["inputs"] = frames
         log["reconstructions"] = frames_rec
+        if mask is not None and mask_rec is not None:
+            log["inputs_mask"] = mask
+            log["reconstructions_mask"] = mask_rec
         #log['mean_org'] = batch['mean_org']
         #log['std_org'] = batch['std_org']
         return log
@@ -314,7 +421,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, n_hiddens, upsample, image_channel, norm_type='group', num_groups=32):
+    def __init__(self, n_hiddens, upsample, image_channel, norm_type='group', num_groups=32, extended=False):
         super().__init__()
 
         n_times_upsample = np.array([int(math.log2(d)) for d in upsample])
@@ -342,7 +449,7 @@ class Decoder(nn.Module):
             n_times_upsample -= 1
 
         self.conv_last = SamePadConv2d(
-            out_channels, image_channel, kernel_size=3)
+            out_channels, image_channel + extended, kernel_size=3)
 
     def forward(self, x):
         h = self.final_block(x)
