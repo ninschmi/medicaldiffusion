@@ -94,6 +94,10 @@ class VQGAN2D(pl.LightningModule):
         self.gradient_clip_val = cfg.model.gradient_clip_val
         self.automatic_optimization=False
 
+        self.sync_dist = False
+        if cfg.model.gpus > 1:
+            self.sync_dist = True
+
     def encode(self, x, include_embeddings=False, quantize=True):
         h = self.pre_vq_conv(self.encoder(x))
         if quantize:
@@ -194,36 +198,36 @@ class VQGAN2D(pl.LightningModule):
                 (image_gan_feat_loss + mask_gan_feat_loss)
 
             self.log("train/g_image_loss", g_image_loss,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log("train/image_gan_feat_loss", image_gan_feat_loss,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log("train/perceptual_loss", perceptual_loss,
-                     prog_bar=True, logger=True, on_step=True, on_epoch=True)
+                     prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log("train/recon_loss", recon_loss, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log("train/aeloss", aeloss, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log("train/commitment_loss", vq_output['commitment_loss'],
-                     prog_bar=True, logger=True, on_step=True, on_epoch=True)
+                     prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log('train/perplexity', vq_output['perplexity'],
-                     prog_bar=True, logger=True, on_step=True, on_epoch=True)
+                     prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             if self.extended:
                 self.log("train/g_mask_loss", g_mask_loss,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/mask_gan_feat_loss", mask_gan_feat_loss,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/perceptual_loss_image", perceptual_loss_image,
-                     prog_bar=True, logger=True, on_step=True, on_epoch=True)
+                     prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/perceptual_loss_mask", perceptual_loss_mask,
-                     prog_bar=True, logger=True, on_step=True, on_epoch=True)
+                     prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/recon_loss_image", recon_loss_image, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/recon_loss_mask", recon_loss_mask, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/aeloss_image", aeloss_image, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/aeloss_mask", aeloss_mask, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             return recon_loss, x_recon, vq_output, aeloss, perceptual_loss, gan_feat_loss
 
         if optimizer_idx == 1:
@@ -241,13 +245,13 @@ class VQGAN2D(pl.LightningModule):
             discloss = discloss_image.clone()
 
             self.log("train/logits_image_real", logits_image_real.mean().detach(),
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log("train/logits_image_fake", logits_image_fake.mean().detach(),
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log("train/d_image_loss", d_image_loss,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             self.log("train/discloss", discloss, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
             if self.extended:
                 logits_mask_real, _ = self.mask_discriminator(frames_mask.detach())
 
@@ -260,15 +264,15 @@ class VQGAN2D(pl.LightningModule):
                 discloss += discloss_mask.clone()
 
                 self.log("train/logits_mask_real", logits_mask_real.mean().detach(),
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/logits_mask_fake", logits_mask_fake.mean().detach(),
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/d_mask_loss", d_mask_loss,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/discloss_image", discloss_image, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 self.log("train/discloss_mask", discloss_mask, prog_bar=True,
-                     logger=True, on_step=True, on_epoch=True)
+                     logger=True, on_step=True, on_epoch=True, sync_dist=self.sync_dist)
                 return discloss
             return discloss
 
@@ -290,37 +294,48 @@ class VQGAN2D(pl.LightningModule):
             y = batch['target'].to(torch.float16)
 
         ### Optimize Discriminator
-
+        self.toggle_optimizer(opt_disc)
         discloss = self.forward(x, y, 1)
-        # scale losses by 1/N (for N batches of gradient accumulation)
-        discloss_scaled = discloss / self.accumulate_grad_batches
 
-        self.manual_backward(discloss_scaled)
+        opt_disc.zero_grad()
+        self.manual_backward(discloss)
+        self.clip_gradients(opt_disc, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+        opt_disc.step()
+        self.untoggle_optimizer(opt_disc)
+        
+        ## scale losses by 1/N (for N batches of gradient accumulation)
+        #discloss_scaled = discloss / self.accumulate_grad_batches
+        #self.manual_backward(discloss_scaled)
+        ## accumulate gradients of N batches
+        #if (batch_idx + 1) % self.accumulate_grad_batches == 0:
+        #   self.clip_gradients(opt_disc, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+        #   opt_disc.step()
+        #   opt_disc.zero_grad()
 
-        # accumulate gradients of N batches
-        if (batch_idx + 1) % self.accumulate_grad_batches == 0:
-            self.clip_gradients(opt_disc, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
-            opt_disc.step()
-            opt_disc.zero_grad()
-
+        
         ### Optimize Autoencoder - the "generator"
-
+        self.toggle_optimizer(opt_ae)
         recon_loss, _, vq_output, aeloss, perceptual_loss, gan_feat_loss = self.forward(
             x, y, 0)
         commitment_loss = vq_output['commitment_loss']
         loss = recon_loss + commitment_loss + aeloss + perceptual_loss + gan_feat_loss
-        # scale losses by 1/N (for N batches of gradient accumulation)
-        loss_scaled = loss / self.accumulate_grad_batches
 
-        self.manual_backward(loss_scaled)
+        opt_ae.zero_grad()
+        self.manual_backward(loss)
+        self.clip_gradients(opt_ae, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+        opt_ae.step()
+        self.untoggle_optimizer(opt_ae)
 
-        # accumulate gradients of N batches
-        if (batch_idx + 1) % self.accumulate_grad_batches == 0:
-            self.clip_gradients(opt_ae, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
-            opt_ae.step()
-            opt_ae.zero_grad()
-        
-        self.log_dict({"loss": loss, "loss_scaled": loss_scaled, "disc_loss": discloss, "disc_loss_scaled": discloss_scaled}, prog_bar=True)
+        ## scale losses by 1/N (for N batches of gradient accumulation)
+        #loss_scaled = loss / self.accumulate_grad_batches
+        #self.manual_backward(loss_scaled)
+        ## accumulate gradients of N batches
+        #if (batch_idx + 1) % self.accumulate_grad_batches == 0:
+        #   self.clip_gradients(opt_ae, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+        #   opt_ae.step()
+        #   opt_ae.zero_grad()
+        #self.log_dict({"loss": loss, "loss_scaled": loss_scaled, "disc_loss": discloss, "disc_loss_scaled": discloss_scaled}, prog_bar=True)
+        self.log_dict({"loss": loss, "disc_loss": discloss}, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         x = batch['data']  # TODO: batch['stft']
@@ -328,18 +343,18 @@ class VQGAN2D(pl.LightningModule):
         if self.extended:
             y = batch['target'].to(torch.float16)
             recon_loss, _, vq_output, perceptual_loss, recon_loss_image, recon_loss_mask, perceptual_loss_image, perceptual_loss_mask = self.forward(x, y)
-            self.log('val/recon_loss_image', recon_loss_image, prog_bar=True)
-            self.log('val/recon_loss_mask', recon_loss_mask, prog_bar=True)
-            self.log('val/perceptual_loss_image', perceptual_loss_image.mean(), prog_bar=True)
-            self.log('val/perceptual_loss_mask', perceptual_loss_mask.mean(), prog_bar=True)
+            self.log('val/recon_loss_image', recon_loss_image, prog_bar=True, sync_dist=self.sync_dist)
+            self.log('val/recon_loss_mask', recon_loss_mask, prog_bar=True, sync_dist=self.sync_dist)
+            self.log('val/perceptual_loss_image', perceptual_loss_image.mean(), prog_bar=True, sync_dist=self.sync_dist)
+            self.log('val/perceptual_loss_mask', perceptual_loss_mask.mean(), prog_bar=True, sync_dist=self.sync_dist)
         else:
             recon_loss, _, vq_output, perceptual_loss = self.forward(x)
 
-        self.log('val/recon_loss', recon_loss, prog_bar=True)
-        self.log('val/perceptual_loss', perceptual_loss.mean(), prog_bar=True)
-        self.log('val/perplexity', vq_output['perplexity'], prog_bar=True)
+        self.log('val/recon_loss', recon_loss, prog_bar=True, sync_dist=self.sync_dist)
+        self.log('val/perceptual_loss', perceptual_loss.mean(), prog_bar=True, sync_dist=self.sync_dist)
+        self.log('val/perplexity', vq_output['perplexity'], prog_bar=True, sync_dist=self.sync_dist)
         self.log('val/commitment_loss',
-                 vq_output['commitment_loss'], prog_bar=True)
+                 vq_output['commitment_loss'], prog_bar=True, sync_dist=self.sync_dist)
 
     def configure_optimizers(self):
         lr = self.cfg.model.lr

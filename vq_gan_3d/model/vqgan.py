@@ -234,16 +234,20 @@ class VQGAN3D(pl.LightningModule):
         ### Optimize Discriminator
 
         discloss = self.forward(x, 1)
-        # scale losses by 1/N (for N batches of gradient accumulation)
-        discloss_scaled = discloss / self.accumulate_grad_batches
+        opt_disc.zero_grad()
+        self.manual_backward(discloss)
 
-        self.manual_backward(discloss_scaled)
+        self.clip_gradients(opt_disc, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+        opt_disc.step()
 
-        # accumulate gradients of N batches
-        if (batch_idx + 1) % self.accumulate_grad_batches == 0:
-            self.clip_gradients(opt_disc, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
-            opt_disc.step()
-            opt_disc.zero_grad()
+        ## scale losses by 1/N (for N batches of gradient accumulation)
+        #discloss_scaled = discloss / self.accumulate_grad_batches
+        #self.manual_backward(discloss_scaled)
+        ## accumulate gradients of N batches
+        #if (batch_idx + 1) % self.accumulate_grad_batches == 0:
+        #   self.clip_gradients(opt_disc, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")self.clip_gradients(opt_disc, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+        #   opt_disc.step()
+        #   opt_disc.zero_grad()
 
         ### Optimize Autoencoder - the "generator"
 
@@ -251,24 +255,27 @@ class VQGAN3D(pl.LightningModule):
             x, 0)
         commitment_loss = vq_output['commitment_loss']
         loss = recon_loss + commitment_loss + aeloss + perceptual_loss + gan_feat_loss
-        # scale losses by 1/N (for N batches of gradient accumulation)
-        loss_scaled = loss / self.accumulate_grad_batches
+        opt_ae.zero_grad()
+        self.manual_backward(loss)
+        self.clip_gradients(opt_ae, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+        opt_ae.step()
 
-        self.manual_backward(loss_scaled)
-
-        # accumulate gradients of N batches
-        if (batch_idx + 1) % self.accumulate_grad_batches == 0:
-            self.clip_gradients(opt_ae, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
-            opt_ae.step()
-            opt_ae.zero_grad()
-        
-        self.log_dict({"ae_loss": loss, "ae_loss_scaled": loss_scaled, "disc_loss": discloss, "disc_loss_scaled": discloss_scaled}, prog_bar=True)
+        ## scale losses by 1/N (for N batches of gradient accumulation)
+        #loss_scaled = loss / self.accumulate_grad_batches
+        #self.manual_backward(loss_scaled)
+        ## accumulate gradients of N batches
+        #if (batch_idx + 1) % self.accumulate_grad_batches == 0:
+        #   self.clip_gradients(opt_ae, gradient_clip_val=self.gradient_clip_val, gradient_clip_algorithm="norm")
+        #   opt_ae.step()
+        #   opt_ae.zero_grad()
+        #self.log_dict({"ae_loss": loss, "ae_loss_scaled": loss_scaled, "disc_loss": discloss, "disc_loss_scaled": discloss_scaled}, prog_bar=True)
+        self.log_dict({"ae_loss": loss, "disc_loss": discloss}, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         x = batch['data']  # TODO: batch['stft']
         recon_loss, _, vq_output, perceptual_loss = self.forward(x)
         self.log('val/recon_loss', recon_loss, prog_bar=True)
-        self.log('val/perceptual_loss', perceptual_loss, prog_bar=True)
+        self.log('val/perceptual_loss', perceptual_loss.mean(), prog_bar=True)
         self.log('val/perplexity', vq_output['perplexity'], prog_bar=True)
         self.log('val/commitment_loss',
                  vq_output['commitment_loss'], prog_bar=True)

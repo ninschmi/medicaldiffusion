@@ -6,6 +6,7 @@ gpus: 1
 accumulate_grad_batches: 1
 default_root_dir: /Users/ninaschmid/MA/medicaldiffusion/checkpoints/vq_gan/
 default_root_dir_postfix: ''
+resume: False
 resume_from_checkpoint:
 max_steps: -1
 max_epochs: -1

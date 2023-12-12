@@ -46,51 +46,51 @@ def run(cfg: DictConfig):
     # or load the most recent checkpoint file in cfg.model.default_root_dir
     dirpath = None 
     version = ''
-    if cfg.model.resume:
-        if ckpt is not None:
-            ckpt_folder = ckpt.replace('latest_checkpoint.ckpt', '')
-            dirpath = ckpt_folder.replace('checkpoints/', '')
-            version = dirpath.split("/")[-2]
-            for file in os.listdir(ckpt_folder):
-                if file.endswith('.ckpt'):
-                    os.rename(os.path.join(ckpt_folder, file),
-                              os.path.join(ckpt_folder, 'prev_' + file))
-            ckpt = ckpt.replace('latest_checkpoint.ckpt', 'prev_latest_checkpoint.ckpt')
-            print('will start from the defined ckpt %s' %
-                cfg.model.resume_from_checkpoint)
-        else:
-            # load the most recent checkpoint file
-            base_dir = os.path.join(cfg.model.default_root_dir, 'lightning_logs')
-            if os.path.exists(base_dir):
-                log_folder = ckpt_file = ''
-                version_id_used = 0
-                for folder in os.listdir(base_dir):
-                    if os.path.exists(os.path.join(base_dir, folder,'checkpoints/latest_checkpoint.ckpt')):
-                        version_id = int(folder.split('_')[1])
-                        if version_id > version_id_used:
-                            version_id_used = version_id
-                            log_folder = folder
-                if len(log_folder) > 0:
-                    ckpt_folder = os.path.join(base_dir, log_folder, 'checkpoints')
-                    for fn in os.listdir(ckpt_folder):
-                        if fn == 'latest_checkpoint.ckpt':
-                            ckpt_file = 'latest_checkpoint_prev.ckpt'
-                            os.rename(os.path.join(ckpt_folder, fn),
-                                      os.path.join(ckpt_folder, ckpt_file))
-                            ckpt = os.path.join(
-                            ckpt_folder, ckpt_file)
-                            print('will start from the most recent ckpt %s' %
-                                cfg.model.resume_from_checkpoint)
-                            dirpath = os.path.join(base_dir, log_folder)
-                            version = dirpath.split("/")[-1]
-                        if fn == 'latest_checkpoint-v1.ckpt' or fn == 'latest_checkpoint-v2.ckpt':
-                            os.remove(os.path.join(ckpt_folder, fn))
-                else:
-                    print('no checkpoints found in %s, will start training from scratch' % base_dir)
-            else:
-                print('%s does not exist, will start training from scratch' % base_dir)
-    else:
-        ckpt = None
+    #if cfg.model.resume:
+    #    if ckpt is not None:
+    #        ckpt_folder = ckpt.replace('latest_checkpoint.ckpt', '')
+    #        dirpath = ckpt_folder.replace('checkpoints/', '')
+    #        version = dirpath.split("/")[-2]
+    #        for file in os.listdir(ckpt_folder):
+    #            if file.endswith('.ckpt'):
+    #                os.rename(os.path.join(ckpt_folder, file),
+    #                          os.path.join(ckpt_folder, 'prev_' + file))
+    #        ckpt = ckpt.replace('latest_checkpoint.ckpt', 'prev_latest_checkpoint.ckpt')
+    #        print('will start from the defined ckpt %s' %
+    #            cfg.model.resume_from_checkpoint)
+    #    else:
+    #        # load the most recent checkpoint file
+    #        base_dir = os.path.join(cfg.model.default_root_dir, 'lightning_logs')
+    #        if os.path.exists(base_dir):
+    #            log_folder = ckpt_file = ''
+    #            version_id_used = 0
+    #            for folder in os.listdir(base_dir):
+    #                if os.path.exists(os.path.join(base_dir, folder,'checkpoints/latest_checkpoint.ckpt')):
+    #                    version_id = int(folder.split('_')[1])
+    #                    if version_id > version_id_used:
+    #                        version_id_used = version_id
+    #                        log_folder = folder
+    #            if len(log_folder) > 0:
+    #                ckpt_folder = os.path.join(base_dir, log_folder, 'checkpoints')
+    #                for fn in os.listdir(ckpt_folder):
+    #                    if fn == 'latest_checkpoint.ckpt':
+    #                        ckpt_file = 'latest_checkpoint_prev.ckpt'
+    #                        os.rename(os.path.join(ckpt_folder, fn),
+    #                                  os.path.join(ckpt_folder, ckpt_file))
+    #                        ckpt = os.path.join(
+    #                        ckpt_folder, ckpt_file)
+    #                        print('will start from the most recent ckpt %s' %
+    #                            cfg.model.resume_from_checkpoint)
+    #                        dirpath = os.path.join(base_dir, log_folder)
+    #                        version = dirpath.split("/")[-1]
+    #                    if fn == 'latest_checkpoint-v1.ckpt' or fn == 'latest_checkpoint-v2.ckpt':
+    #                        os.remove(os.path.join(ckpt_folder, fn))
+    #            else:
+    #                print('no checkpoints found in %s, will start training from scratch' % base_dir)
+    #        else:
+    #            print('%s does not exist, will start training from scratch' % base_dir)
+    #else:
+    #    ckpt = None
 
     callbacks = []
     callbacks.append(ModelCheckpoint(monitor='val/recon_loss',
@@ -112,29 +112,30 @@ def run(cfg: DictConfig):
         devices=cfg.model.gpus
         if cfg.model.gpus > 1:
             # Explicitly specify the process group backend if you choose to
-            ddp = DDPStrategy(process_group_backend="gloo")
+            ddp = DDPStrategy(process_group_backend="gloo", find_unused_parameters=True)
             strategy = ddp
+            #strategy = 'ddp'
 
     # when resuming training, make sure that log_dir is set accordingly (keep saving the logs in the same directory)
     logger = None
-    if dirpath is not None:
-        try:
-            logger = TensorBoardLogger(save_dir=cfg.model.default_root_dir, version=int(version.split('_')[-1]))
-        except:
-            warning_cache = WarningCache()
-            warning_cache.warn(
-                "Starting from v1.9.0, `tensorboardX` has been removed as a dependency of the `lightning.pytorch`"
-                " package, due to potential conflicts with other packages in the ML ecosystem. For this reason,"
-                " `logger=True` will use `CSVLogger` as the default logger, unless the `tensorboard`"
-                " or `tensorboardX` packages are found."
-                " Please `pip install lightning[extra]` or one of them to enable TensorBoard support by default"
-            )
-            logger = CSVLogger(save_dir=cfg.model.default_root_dir, version=int(version.split('_')[-1]))  # type: ignore[assignment]
-            #load metrics from metrics.csv file
-            metrics_file = logger.log_dir + '/' + logger.experiment.NAME_METRICS_FILE
-            with open(metrics_file) as file:
-                keys = file.readline().strip().split(",")
-            logger.experiment.metrics_keys=keys
+    #if dirpath is not None:
+    #    try:
+    #        logger = TensorBoardLogger(save_dir=cfg.model.default_root_dir, version=int(version.split('_')[-1]))
+    #    except:
+    #        warning_cache = WarningCache()
+    #        warning_cache.warn(
+    #            "Starting from v1.9.0, `tensorboardX` has been removed as a dependency of the `lightning.pytorch`"
+    #            " package, due to potential conflicts with other packages in the ML ecosystem. For this reason,"
+    #            " `logger=True` will use `CSVLogger` as the default logger, unless the `tensorboard`"
+    #            " or `tensorboardX` packages are found."
+    #            " Please `pip install lightning[extra]` or one of them to enable TensorBoard support by default"
+    #        )
+    #        logger = CSVLogger(save_dir=cfg.model.default_root_dir, version=int(version.split('_')[-1]))  # type: ignore[assignment]
+    #        #load metrics from metrics.csv file
+    #        metrics_file = logger.log_dir + '/' + logger.experiment.NAME_METRICS_FILE
+    #        with open(metrics_file) as file:
+    #            keys = file.readline().strip().split(",")
+    #        logger.experiment.metrics_keys=keys
 
     trainer = pl.Trainer(
         devices=devices,

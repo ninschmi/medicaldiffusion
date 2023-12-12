@@ -4,6 +4,7 @@ import os
 from typing import Optional
 import argparse
 from torchvision.transforms import RandomCrop
+from torchvision.transforms.functional import crop, pil_to_tensor
 
 
 PREPROCESSING_TRANSFORMS = tio.Compose([
@@ -13,7 +14,7 @@ PREPROCESSING_TRANSFORMS = tio.Compose([
 
 TRAIN_TRANSFORMS = tio.Compose([
     tio.RandomFlip(axes=(1), flip_probability=0.5),
-    tio.transforms.Resize([1024,1024,1])
+    tio.transforms.Resize([512,512,1])    #previous[1024,1024,1]
 ])
 
 CROP_TRANSFORM = RandomCrop((64,64))
@@ -50,14 +51,26 @@ class FIVESDataset(Dataset):
         img = tio.ScalarImage(self.file_paths[idx])
         img = self.preprocessing(img)
         if self.extended:
-            mask = tio.LabelMap(self.mask_file_paths[idx])
+            mask = tio.LabelMap(self.mask_file_paths[idx]) # 0 or 255 pixelvalues
+            mask.data = mask.data * 2. / 255. - 1
             mask = self.preprocessing(mask)
             subject = tio.Subject(image=img, seg=mask)
             subject = self.transforms(subject)
-            img_cropped = self.cropping(subject['image'].data.permute(0, -1, 1, 2).squeeze(dim=1))
-            mask_cropped = self.cropping(subject['seg'].data.permute(0, -1, 1, 2).squeeze(dim=1))
-        
-            return {'data': img_cropped, 'target': mask_cropped}
+            #self.sampler = tio.data.LabelSampler(patch_size=(64,64,1), label_name="seg")
+            #patches = self.sampler(subject=subject, num_patches=1)
+            #patch = [patch for patch in patches]
+            #patch = patch[0]
+            #return {'data': patch['image'].data.permute(0, -1, 1, 2).squeeze(dim=1), 'target': patch['seg'].data.permute(0, -1, 1, 2).squeeze(dim=1)}
+            
+            # with cropping
+            #i, j, h, w = RandomCrop.get_params(subject['image'].as_pil(), output_size=(64, 64))
+            #img_cropped = crop(subject['image'].data.permute(0, -1, 1, 2).squeeze(dim=1), i, j, h, w)
+            #mask_cropped = crop(subject['seg'].data.permute(0, -1, 1, 2).squeeze(dim=1), i, j, h, w)
+            ##img_cropped = self.cropping(subject['image'].data.permute(0, -1, 1, 2).squeeze(dim=1))
+            ##mask_cropped = self.cropping(subject['seg'].data.permute(0, -1, 1, 2).squeeze(dim=1))
+            #return {'data': img_cropped, 'target': mask_cropped}
+            # without cropping
+            return {'data': subject['image'].data.permute(0, -1, 1, 2).squeeze(dim=1), 'target': subject['seg'].data.permute(0, -1, 1, 2).squeeze(dim=1)}
         else:
             img = self.transforms(img)
             img_cropped = self.cropping(img.data.permute(0, -1, 1, 2).squeeze(dim=1))
