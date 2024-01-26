@@ -91,6 +91,7 @@ def run(cfg: DictConfig):
     #            print('%s does not exist, will start training from scratch' % base_dir)
     #else:
     #    ckpt = None
+    ckpt = None
 
     callbacks = []
     callbacks.append(ModelCheckpoint(monitor='val/recon_loss',
