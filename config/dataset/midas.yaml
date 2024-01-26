@@ -1,0 +1,3 @@
+name: MIDAS
+root_dir: /data/MIDAS/dataset/
+image_channels: 1
