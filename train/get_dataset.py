@@ -1,4 +1,4 @@
-from dataset import MRNetDataset, BRATSDataset, ADNIDataset, DUKEDataset, LIDCDataset, FIVESDataset, DEFAULTDataset
+from dataset import MRNetDataset, BRATSDataset, ADNIDataset, DUKEDataset, LIDCDataset, FIVESDataset, MIDASDataset, OpenNeuroDataset, DEFAULTDataset
 from torch.utils.data import WeightedRandomSampler
 import os
 
@@ -42,9 +42,23 @@ def get_dataset(cfg):
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'FIVES':
         train_dataset = FIVESDataset(
-            root_dir=os.path.join(cfg.dataset.root_dir, "train/"))
+            root_dir=os.path.join(cfg.dataset.root_dir, "train/"), extended=cfg.model.extended)
         val_dataset = FIVESDataset(
-            root_dir=os.path.join(cfg.dataset.root_dir, "train/"))
+            root_dir=os.path.join(cfg.dataset.root_dir, "train/"), extended=cfg.model.extended)
+        sampler = None
+        return train_dataset, val_dataset, sampler
+    if cfg.dataset.name == 'MIDAS':
+        train_dataset = MIDASDataset(
+            root_dir=cfg.dataset.root_dir, extended=cfg.model.extended)
+        val_dataset = MIDASDataset(
+            root_dir=cfg.dataset.root_dir, extended=cfg.model.extended)
+        sampler = None
+        return train_dataset, val_dataset, sampler
+    if cfg.dataset.name == 'OPENNEURO':
+        train_dataset = OpenNeuroDataset(
+            root_dir=cfg.dataset.root_dir, extended=cfg.model.extended)
+        val_dataset = OpenNeuroDataset(
+            root_dir=cfg.dataset.root_dir, extended=cfg.model.extended)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'DEFAULT':

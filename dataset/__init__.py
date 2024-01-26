@@ -6,3 +6,5 @@ from dataset.duke import DUKEDataset
 from dataset.lidc import LIDCDataset
 from dataset.default import DEFAULTDataset
 from dataset.fives import FIVESDataset
+from dataset.midas import MIDASDataset
+from dataset.openneuro import OpenNeuroDataset

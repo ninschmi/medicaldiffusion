@@ -1,0 +1,3 @@
+name: OPENNEURO
+root_dir: /data/openneuro/
+image_channels: 1
