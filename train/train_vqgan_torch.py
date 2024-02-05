@@ -109,6 +109,7 @@ def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logg
         print("current epoch: ", current_epoch)
         
         # Training
+        logger.update_epoch(current_epoch)
         logger.reset_results()
         #TODO
         #self._first_loop_iter = None
