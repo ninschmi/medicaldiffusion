@@ -101,6 +101,7 @@ class TensorBoardLogger():
         self.train_results = _ResultCollection(training=True)
         self.val_results = _ResultCollection(training=False)
         self._train_state = None
+        self.current_epoch = None
     
     def configure_logger(self):
         self._log_dir = os.path.join(self.root_dir, f'lightning_logs')
@@ -198,6 +199,8 @@ class TensorBoardLogger():
         if step is None:
             step = metrics.pop("step", None)
 
+        metrics.setdefault("epoch", self.current_epoch)
+
         assert step is not None, "You must provide a step when logging with the TensorBoardLogger."
 
         for k, v in metrics.items():
@@ -261,6 +264,9 @@ class TensorBoardLogger():
             self.train_results.reset()
         elif self.val_results is not None:
             self.val_results.reset()
+
+    def update_epoch(self, epoch: int) -> None:
+        self.current_epoch = epoch
 
     def on_train_batch_start(self, batch) -> None:
         #if self._first_loop_iter is None:
