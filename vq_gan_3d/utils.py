@@ -13,6 +13,7 @@ import sys
 import pdb as pdb_original
 import SimpleITK as sitk
 import logging
+import nibabel as nib
 
 import imageio.core.util
 logging.getLogger("imageio_ffmpeg").setLevel(logging.ERROR)
@@ -135,6 +136,9 @@ def save_video_grid(video, fname, nrow=None, fps=6):
         start_r = (padding + h) * r
         start_c = (padding + w) * c
         video_grid[:, start_r:start_r + h, start_c:start_c + w] = video[i]
+    #nii
+    nib.save(nib.Nifti1Image(video_grid, affine=None), fname.replace('.mp4', '.nii')) 
+    #mp4
     video = []
     for i in range(t):
         video.append(video_grid[i])
