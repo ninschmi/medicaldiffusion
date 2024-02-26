@@ -56,9 +56,9 @@ def get_dataset(cfg):
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'OPENNEURO':
         train_dataset = OpenNeuroDataset(
-            root_dir=cfg.dataset.root_dir, extended=cfg.model.extended)
+            root_dir=os.path.join(cfg.dataset.root_dir, "train/"), extended=cfg.model.extended)
         val_dataset = OpenNeuroDataset(
-            root_dir=cfg.dataset.root_dir, extended=cfg.model.extended)
+            root_dir=os.path.join(cfg.dataset.root_dir, "valid/"), extended=cfg.model.extended)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'DEFAULT':

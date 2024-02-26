@@ -24,17 +24,20 @@ class OpenNeuroDataset(Dataset):
     def __init__(self, root_dir='../openneuro', extended=False):
         self.root_dir = root_dir
         self.extended = extended
-        self.file_names, self.mask_file_names = self.get_data_files()
+        self.file_names, self.mask_file_names = self.get_data_files(images_only=False)
 
-    def get_data_files(self):
+    def get_data_files(self, images_only=False):
         file_names = []
         mask_file_names = []
+        if images_only:
+            return glob.glob(os.path.join(
+            self.root_dir, './**/*brain_mask.nii.gz'), recursive=True), []
         for folder_name in os.listdir(self.root_dir):
             path = os.path.join(self.root_dir, folder_name)
             if not os.path.isdir(path):
                 continue
             for file_name in os.listdir(path):
-                if file_name.startswith('sub') and file_name.endswith('.nii'):
+                if file_name.startswith('sub') and file_name.endswith('brain_mask.nii'):
                     file_names.append(os.path.join(path, file_name))
                 elif file_name.endswith('Segmentation.nii') and self.extended:
                     mask_file_names.append(os.path.join(path, file_name))
@@ -82,7 +85,7 @@ class OpenNeuroDataset(Dataset):
         image = np.asanyarray(image.dataobj)
         image = np.transpose(image, (2, 1, 0))
         image_resized, values = self.roi_crop(image)
-        sp_size = 128
+        sp_size = 128 if self.extended else 64
         #TODO order of resize and intensity normalization
         #image_resized = resize(image_resized, (sp_size, sp_size, sp_size), mode='constant')
         image_resized = tio.transforms.Resize([sp_size, sp_size, sp_size], image_interpolation='linear')(torch.unsqueeze(torch.Tensor(image_resized), 0)) 
