@@ -27,8 +27,12 @@ class ImageLogger():
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, split)
         for k in images:
-            images[k] = (images[k] + 1.0) * 127.5  # std + mean
-            torch.clamp(images[k], 0, 255)
+            if "mask" in k:
+                images[k] = (images[k] + 1.0) / 2.  # binary mask
+                images[k] = torch.round(images[k]) * 255
+            else:
+                images[k] = (images[k] + 1.0) * 127.5  # std + mean
+                torch.clamp(images[k], 0, 255)
             grid = torchvision.utils.make_grid(images[k], nrow=4)
             grid = grid
             grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
@@ -93,9 +97,13 @@ class VideoLogger():
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, split)
         for k in videos:
-            videos[k] = (videos[k] + 1.0) * 127.5  # std + mean
-            torch.clamp(videos[k], 0, 255)
-            videos[k] = videos[k] / 255.0
+            if "mask" in k:
+                videos[k] = (videos[k] + 1.0) / 2.  # binary mask
+                videos[k] = torch.round(videos[k])
+            else:
+                videos[k] = (videos[k] + 1.0) * 127.5  # std + mean
+                torch.clamp(videos[k], 0, 255)
+                videos[k] = videos[k] / 255.0
             grid = videos[k]
             filename = "{}_gs-{:06}_e-{:06}_b-{:06}.mp4".format(
                 k,
