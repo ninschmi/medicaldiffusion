@@ -17,7 +17,7 @@ from omegaconf.dictconfig import DictConfig
 from omegaconf.errors import UnsupportedValueType, ValidationError
 from torch.utils.tensorboard.summary import hparams
 from torchmetrics import Metric, MetricCollection
-from train.results_torch import _ResultCollection
+from train.results_torch import _ResultCollection, _METRICS, _OUT_DICT
 
 def _flatten_dict(params: MutableMapping[Any, Any], delimiter: str = "/", parent_key: str = "") -> Dict[str, Any]:
     result: Dict[str, Any] = {}
@@ -97,11 +97,12 @@ class TensorBoardLogger():
         self.logger = SummaryWriter(log_dir=self.log_dir)
         self.default_hp_metric = default_hp_metric
         self.hparams: Union[Dict[str, Any], Namespace] = {}
-        self.metrics = {}
         self.train_results = _ResultCollection(training=True)
         self.val_results = _ResultCollection(training=False)
         self._train_state = None
-        self.current_epoch = None
+        self.current_epoch = 0
+        self._callback_metrics: Dict[str, Tensor] = {}
+        self._first_loop_iter: Optional[bool] = None
     
     def configure_logger(self):
         self._log_dir = os.path.join(self.root_dir, f'lightning_logs')
@@ -269,58 +270,67 @@ class TensorBoardLogger():
         self.current_epoch = epoch
 
     def on_train_batch_start(self, batch) -> None:
-        #if self._first_loop_iter is None:
-        #    self._first_loop_iter = True
-        #elif self._first_loop_iter is True:
-        #    self._first_loop_iter = False
+        if self._first_loop_iter is None:
+            self._first_loop_iter = True
+        elif self._first_loop_iter is True:
+            self._first_loop_iter = False
         assert self.train_results is not None
         # attach reference to the new batch and remove the cached batch_size
         self.train_results.batch = batch
         self.train_results.batch_size = None
 
     def on_train_batch_end(self, step) -> None:
-        #assert isinstance(self._first_loop_iter, bool)
+        assert isinstance(self._first_loop_iter, bool)
         assert self.train_results is not None
         # drop the reference to current batch and batch_size
         self.train_results.batch = None
         self.train_results.batch_size = None
 
+        self._callback_metrics.update(self.train_results.metrics(on_step=True)["callback"])
         # Log Batch Metrics
         # when metrics should be logged and no gradient accumulation is selected
-        #assert isinstance(self._first_loop_iter, bool)
         if self.should_update_logs(step):    # False if step % trainer.log_every_n_steps != 0 or log_every_n_steps == 0
-            self.log_metrics(self.train_results.metrics(on_step=True), step=step)
+            self.log_metrics(self.train_results.metrics(on_step=True)["log"], step=step)
     
     def on_val_batch_start(self, batch) -> None:
-        #if self._first_loop_iter is None:
-        #    self._first_loop_iter = True
-        #elif self._first_loop_iter is True:
-        #    self._first_loop_iter = False
+        if self._first_loop_iter is None:
+            self._first_loop_iter = True
+        elif self._first_loop_iter is True:
+            self._first_loop_iter = False
         assert self.val_results is not None
         # attach reference to the new batch and remove the cached batch_size
         self.val_results.batch = batch
         self.val_results.batch_size = None
 
     def on_val_batch_end(self, step) -> None:
-        #assert isinstance(self._first_loop_iter, bool)
+        assert isinstance(self._first_loop_iter, bool)
         assert self.val_results is not None
         # drop the reference to current batch and batch_size
         self.val_results.batch = None
         self.val_results.batch_size = None
 
+        self._callback_metrics.update(self.val_results.metrics(on_step=True)["callback"])
         # Log Batch Metrics
-        #assert isinstance(self._first_loop_iter, bool)
         # logs user requested information to logger
-        self.log_metrics(self.val_results.metrics(on_step=True), step=step)
+        self.log_metrics(self.val_results.metrics(on_step=True)["log"], step=step)
 
     def teardown(self) -> None:
         self.train_results.cpu()
         self.val_results.cpu()
+        #self._callback_metrics.cpu()
+        self._callback_metrics = {k: v.cpu() for k, v in self._callback_metrics.items()}
+
+    def on_epoch_end(self) -> None:
+        self._first_loop_iter = None
+        assert self._first_loop_iter is None
+
+        self._callback_metrics.update(self.train_results.metrics(on_step=False)["callback"])
+        self._callback_metrics.update(self.val_results.metrics(on_step=False)["callback"])
 
     def log_results(self, step: int) -> None:
-        #assert self._first_loop_iter is None
-        self.log_metrics(self.val_results.metrics(on_step=False), step=step) #on evaluation end
-        self.log_metrics(self.train_results.metrics(on_step=False), step=step)   #on training epoch end
+        assert self._first_loop_iter is None
+        self.log_metrics(self.val_results.metrics(on_step=False)["log"], step=step) #on evaluation end
+        self.log_metrics(self.train_results.metrics(on_step=False)["log"], step=step)   #on training epoch end
 
     def should_update_logs(self, step) -> bool:
         log_every_n_steps = 50
@@ -366,6 +376,19 @@ class TensorBoardLogger():
     @property
     def train_state(self) -> str:
         return self._train_state
+    
+    def callback_metrics(self, train) -> _OUT_DICT:
+        on_step = self._first_loop_iter is not None
+        if train and self.train_results is not None:
+            metrics = self.train_results.metrics(on_step)["callback"]
+            self._callback_metrics.update(metrics)
+        elif not train and self.val_results is not None:
+            metrics = self.val_results.metrics(on_step)["callback"]
+            self._callback_metrics.update(metrics)
+        return self._callback_metrics
+
+    def reset_metrics(self) -> None:
+        self._callback_metrics = {}
     
     @train_state.setter
     def train_state(self, val: bool) -> None:

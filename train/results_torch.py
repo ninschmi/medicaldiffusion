@@ -3,6 +3,7 @@
 from dataclasses import dataclass, is_dataclass
 from functools import partial, wraps
 from typing import Any, Callable, Dict, Generator, Iterable, List, Mapping, Optional, Tuple, Union, cast
+from typing_extensions import TypedDict
 
 import torch
 from torch import Tensor
@@ -11,6 +12,10 @@ from torchmetrics import Metric
 _VALUE = Union[Metric, Tensor]  # Do not include scalars as they were converted to tensors
 _OUT_DICT = Dict[str, Tensor]
 BType = Union[Tensor, str, Mapping[Any, "BType"], Iterable["BType"]]
+
+class _METRICS(TypedDict):
+    callback: _OUT_DICT
+    log: _OUT_DICT
 
 @dataclass
 class _Sync:
@@ -354,8 +359,8 @@ class _ResultCollection(dict):
         forked_name = result_metric.meta.forked_name(on_step)
         return name, forked_name
 
-    def metrics(self, on_step: bool) -> _OUT_DICT:
-        metrics = {}
+    def metrics(self, on_step: bool) -> _METRICS:
+        metrics = _METRICS(callback={}, log={})
 
         for _, result_metric in self.valid_items():
             # extract forward_cache or computed from the _ResultMetric
@@ -366,13 +371,12 @@ class _ResultCollection(dict):
             name, forked_name = self._forked_name(result_metric, on_step)
 
             # populate logging metrics
-            metrics[forked_name] = value
+            metrics["log"][forked_name] = value
 
-            #TODO
-            ## populate callback metrics. callback metrics don't take `_step` forked metrics
-            #if self.training or result_metric.meta.on_epoch and not on_step:
-            #    metrics["callback"][name] = value
-            #    metrics["callback"][forked_name] = value
+            # populate callback metrics. callback metrics don't take `_step` forked metrics
+            if self.training or result_metric.meta.on_epoch and not on_step:
+                metrics["callback"][name] = value
+                metrics["callback"][forked_name] = value
 
             #TODO
             ## populate progress_bar metrics. convert tensors to numbers
