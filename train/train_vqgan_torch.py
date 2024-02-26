@@ -1,5 +1,6 @@
 "Adapted from https://github.com/SongweiGe/TATS"
 
+import copy
 import numpy as np
 import os
 import sys
@@ -7,7 +8,6 @@ import random
 import torch
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-#TODO remove from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 from ddpm.diffusion import default
 from vq_gan_3d.model import VQGAN3D
@@ -18,12 +18,18 @@ from train.get_dataset import get_dataset
 import hydra
 from omegaconf import DictConfig, open_dict
 from train.logger import TensorBoardLogger
+from train.model_checkpoint import ModelCheckpoint
+from train.checkpoint import Checkpoint
 from contextlib import nullcontext
 import socket
 from threading import Thread
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple, MutableMapping
 import pickle
-from train.utils import _ChildProcessObserver
+from train.utils import _ChildProcessObserver, AttributeDict, collect_init_args
+import inspect
+import types
+from dataclasses import fields, is_dataclass
+from argparse import Namespace
 
 # train_status
 #   0 INITIALIZING = "initializing"
@@ -99,9 +105,12 @@ def is_picklable(obj: object) -> bool:
     except (pickle.PickleError, AttributeError, RuntimeError, TypeError):
         return False
 
-def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logger, video_logger, device) -> None:
+def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logger, video_logger, device, callbacks) -> None:
     current_epoch = 0
     global_step = 0 # batches_that_stepped
+    num_optimizers = len(model.optimizers)
+
+    #TODO connect checkpoint training resumed from with model_checkpoint.ckpt_path = ckpt
 
     # Training loop
     print("Starting Training Loop...")
@@ -111,9 +120,6 @@ def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logg
         # Training
         logger.update_epoch(current_epoch)
         logger.reset_results()
-        #TODO
-        #self._first_loop_iter = None
-        #self._current_fx = None
 
         for batch_idx, batch in enumerate(train_dataloader):
             batch = {k: v.to(device=device, non_blocking=True) for k, v in batch.items()}
@@ -132,9 +138,12 @@ def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logg
             #    self.strategy.barrier("Trainer.save_checkpoint")
 
             # ON TRAIN BATCH END - on_train_batch_end
-            image_logger.log_img(batch, batch_idx, global_step * 2, current_epoch, split="train")
+            image_logger.log_img(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="train")
             #3D
-            video_logger.log_vid(batch, batch_idx, global_step * 2, current_epoch, split="train")
+            video_logger.log_vid(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="train")
+
+            for cb in callbacks:
+                cb.on_train_batch_end((global_step+ 1) * num_optimizers, current_epoch)
 
             # ON BATCH END
             logger.on_train_batch_end(step=global_step)
@@ -154,15 +163,20 @@ def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logg
                 model.validation_step(val_batch)
 
                 # ON VALIDATION BATCH END - on_validation_batch_end
-                image_logger.log_img(batch, batch_idx, global_step, current_epoch, split="val")  
+                image_logger.log_img(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="val")  
                 #3D
-                video_logger.log_vid(batch, batch_idx, global_step, current_epoch, split="val")
+                video_logger.log_vid(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="val")
 
                 # ON BATCH END
                 logger.on_val_batch_end(step=val_batch_idx+(global_step-1)*len(val_dataloader))
 
         print(f"validation step completed after {global_step} steps")
 
+        logger.on_epoch_end()
+
+        for cb in callbacks:
+            cb.on_validation_end(global_step * num_optimizers, current_epoch)
+            cb.on_train_epoch_end(global_step * num_optimizers, current_epoch)
         
         #log metrics after every epoch 
         logger.log_results(step=global_step-1)
@@ -183,7 +197,7 @@ def run(cfg: DictConfig):
     # Dataset, Dataloader
     train_dataset, val_dataset, sampler = get_dataset(cfg)
     train_dataloader = DataLoader(dataset=train_dataset, batch_size=cfg.model.batch_size,
-                                  num_workers=cfg.model.num_workers, sampler=sampler)
+                                  num_workers=cfg.model.num_workers, shuffle=True)  #sampler=sampler
     val_dataloader = DataLoader(val_dataset, batch_size=cfg.model.batch_size,
                                 shuffle=False, num_workers=cfg.model.num_workers)
 
@@ -205,7 +219,7 @@ def run(cfg: DictConfig):
     # Model
     if cfg.dataset.name == 'FIVES':
         model = VQGAN2D_torch(cfg, logger)
-    elif cfg.dataset.name == 'MIDAS' or cfg.dataset.name == 'OPENNEURO':
+    elif cfg.dataset.name == 'MIDAS' or cfg.dataset.name == 'OPENNEURO' or cfg.dataset.name == 'ADNI':
         model = VQGAN3D_torch(cfg, logger)
     else:
         model = VQGAN3D(cfg)
@@ -214,13 +228,73 @@ def run(cfg: DictConfig):
 
     train_status = 0
 
+    optimizers = model.optimizers if cfg.model.extended else model.optimizers[:-1]
+
+    checkpoint = Checkpoint(model, optimizers)
+
     # push all model checkpoint callbacks to the end
     # it is important that these are the last callbacks to run
-    #TODO convert callbacks to raw pytorch
-    #callbacks.append(ModelCheckpoint(monitor='val/recon_loss',
-    #                 save_top_k=3, mode='min', filename='latest_checkpoint'))
-    #callbacks.append(ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1,
-    #                 filename='{epoch}-{step}-10000-{train/recon_loss:.2f}'))
+    callbacks = []
+    #save top 3 for all validation losses individually
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/recon_loss',
+                     save_top_k=3, mode='min', filename='val/recon_loss/{val/recon_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/recon_loss_image',
+                     save_top_k=3, mode='min', filename='val/recon_loss_image/{val/recon_loss_image:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/recon_loss_mask',
+                     save_top_k=3, mode='min', filename='val/recon_loss_mask/{val/recon_loss_mask:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/perceptual_loss',
+                     save_top_k=3, mode='min', filename='val/perceptual_loss/{val/perceptual_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/perceptual_loss_image',
+                     save_top_k=3, mode='min', filename='val/perceptual_loss_image/{val/perceptual_loss_image:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/perceptual_loss_mask',
+                     save_top_k=3, mode='min', filename='val/perceptual_loss_mask/{val/perceptual_loss_mask:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/commitment_loss',
+                     save_top_k=3, mode='min', filename='val/commitment_loss/{val/commitment_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_image_loss',
+                     save_top_k=3, mode='min', filename='val/g_image_loss/{val/g_image_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_video_loss',
+                     save_top_k=3, mode='min', filename='val/g_video_loss/{val/g_video_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_mask_image_loss',
+                     save_top_k=3, mode='min', filename='val/g_mask_image_loss/{val/g_mask_image_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_mask_video_loss',
+                     save_top_k=3, mode='min', filename='val/g_mask_video_loss/{val/g_mask_video_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/image_gan_feat_loss',
+                     save_top_k=3, mode='min', filename='val/image_gan_feat_loss/{val/image_gan_feat_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/video_gan_feat_loss',
+                     save_top_k=3, mode='min', filename='val/video_gan_feat_loss/{val/video_gan_feat_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/mask_image_gan_feat_loss',
+                     save_top_k=3, mode='min', filename='val/mask_image_gan_feat_los/{val/mask_image_gan_feat_los:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/mask_video_gan_feat_loss',
+                     save_top_k=3, mode='min', filename='val/mask_video_gan_feat_loss/{val/mask_video_gan_feat_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/aeloss',
+                     save_top_k=3, mode='min', filename='val/aeloss/{val/aeloss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/aeloss_image',
+                     save_top_k=3, mode='min', filename='val/aeloss_image/{val/aeloss_image:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/aeloss_mask',
+                     save_top_k=3, mode='min', filename='val/aeloss_mask/{val/aeloss_mask:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/discloss',
+                     save_top_k=3, mode='min', filename='val/discloss/{val/discloss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/discloss_image',
+                     save_top_k=3, mode='min', filename='val/discloss_image/{val/discloss_images:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/discloss_mask',
+                     save_top_k=3, mode='min', filename='val/discloss_mask/{val/discloss_mask:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_image_loss',
+                     save_top_k=3, mode='min', filename='val/d_image_loss/{val/d_image_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_video_loss',
+                     save_top_k=3, mode='min', filename='val/d_video_loss/{val/d_video_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_mask_image_loss',
+                     save_top_k=3, mode='min', filename='val/d_mask_image_loss/{val/d_mask_image_loss:.2f}', logger=logger))
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_mask_video_loss',
+                 save_top_k=3, mode='min', filename='val/d_mask_video_loss/{val/d_mask_video_loss:.2f}', logger=logger))
+    #save at every 100 epochs
+    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, every_n_epochs=100, save_top_k=-1, save_last=True,
+                     filename='train/{epoch}-{step}', logger=logger))
+    #callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/recon_loss',
+    #                 save_top_k=3, mode='min', filename='latest_checkpoint', logger=logger))
+    #callbacks.append(ModelCheckpoint(checkpoint=checkpoint, every_n_train_steps=3000,
+    #                 save_top_k=-1, filename='{epoch}-{step}-{train/recon_loss:.2f}', logger=logger))
+    #callbacks.append(ModelCheckpoint(checkpoint=checkpoint, every_n_train_steps=10000, save_top_k=-1,
+    #                 filename='{epoch}-{step}-10000-{train/recon_loss:.2f}', logger=logger))
     image_logger = ImageLogger(
         batch_frequency=750, model=model, save_dir=logger.log_dir, max_images=4, clamp=True)
     video_logger = VideoLogger(
@@ -401,6 +475,7 @@ def run(cfg: DictConfig):
         root_device = device
 
     optimizers = model.module.optimizers if isinstance(model, DDP) else model.optimizers
+    optimizers = optimizers if cfg.model.extended else model.optimizers[:-1]
     # set up optimizers after the wrapped module has been moved to the device
     for opt in optimizers:
         for p, v in opt.state.items():
@@ -426,9 +501,58 @@ def run(cfg: DictConfig):
             for k in del_attrs:
                 print(f"attribute '{k}' removed from hparams because it cannot be pickled")
                 del model.hparams[k]
-        # HOOKS
-        #TODO
-        # on_fit_start (callback_hooks and lightning_module_hook)
+
+        # save hyperparameters
+        current_frame = inspect.currentframe()
+        if current_frame:
+            frame = current_frame.f_back
+    
+        if not isinstance(frame, types.FrameType):
+            raise AttributeError("There is no `frame` available while being required.")
+
+        init_args = {'cfg': cfg}
+        #for local_args in collect_init_args(frame, [], classes=(VQGAN3D_torch,)):
+        #    init_args.update(local_args)
+       
+        ignore = []
+        ignore = list(set(ignore))
+        init_args = {k: v for k, v in init_args.items() if k not in ignore}
+
+        # take all arguments
+        hp = init_args
+        hparams_name = "kwargs" if hp else None
+
+        # `hparams` are expected here
+        if isinstance(hp, Namespace):
+            hp = vars(hp)
+        if isinstance(hp, dict):
+            hp = AttributeDict(hp)
+        elif isinstance(hp, (bool, int, float, str)):
+            raise ValueError(f"Primitives {(bool, int, float, str)} are not allowed.")
+        elif not isinstance(hp, (AttributeDict, MutableMapping, Namespace)):
+            raise ValueError(f"Unsupported config type of {type(hp)}.")
+    
+        hparams = AttributeDict()
+        if isinstance(hp, dict) and isinstance(hparams, dict):
+            hparams.update(hp)
+        else:
+            hparams = hp
+
+        for k, v in hparams.items():
+            if isinstance(v, nn.Module):
+                #rank_zero_warn()
+                print(
+                    f"Attribute {k!r} is an instance of `nn.Module` and is already saved during checkpointing."
+                    f" It is recommended to ignore them using `self.save_hyperparameters(ignore=[{k!r}])`."
+                )
+
+        # make a deep copy so there are no other runtime changes reflected
+        hparams_initial = copy.deepcopy(hparams)
+
+        # log hyperparameters
+        if hparams_initial is not None:
+            logger.log_hyperparams(hparams_initial)
+        logger.save()
                 
         # wait for all to join if on distributed
         if num_processes > 1:
@@ -439,8 +563,11 @@ def run(cfg: DictConfig):
             else:
                 torch.distributed.barrier()
 
+        ckpt = cfg.model.resume_from_checkpoint
+
+
         
-        train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logger, video_logger, device)
+        train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logger, video_logger, device, callbacks)
 
         #teardown and post-training clean up
         print(f"tearing down strategy")
@@ -470,9 +597,6 @@ def run(cfg: DictConfig):
                 torch._C._cuda_clearCublasWorkspaces()
             torch.cuda.empty_cache()
 
-        # HOOKS
-        #TODO
-        # on_fit_end (callback_hooks and lightning_module_hook)
             
         # todo: TPU 8 cores hangs in flush with TensorBoard. Might do for all loggers.
         # It might be related to xla tensors blocked when moving the cpu kill loggers.
