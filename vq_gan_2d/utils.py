@@ -4,6 +4,7 @@
 import warnings
 import torch
 import imageio
+import inspect
 
 import math
 import numpy as np
@@ -13,6 +14,8 @@ import sys
 import pdb as pdb_original
 import SimpleITK as sitk
 import logging
+
+from typing import Any, Callable, Dict, List, Literal, Optional, Union, Tuple, Type
 
 import imageio.core.util
 logging.getLogger("imageio_ffmpeg").setLevel(logging.ERROR)
@@ -118,31 +121,6 @@ def adopt_weight(global_step, threshold=0, value=0.):
         weight = value
     return weight
 
-
-def save_video_grid(video, fname, nrow=None, fps=6):
-    b, c, t, h, w = video.shape
-    video = video.permute(0, 2, 3, 4, 1)
-    video = (video.cpu().numpy() * 255).astype('uint8')
-    if nrow is None:
-        nrow = math.ceil(math.sqrt(b))
-    ncol = math.ceil(b / nrow)
-    padding = 1
-    video_grid = np.zeros((t, (padding + h) * nrow + padding,
-                           (padding + w) * ncol + padding, c), dtype='uint8')
-    for i in range(b):
-        r = i // ncol
-        c = i % ncol
-        start_r = (padding + h) * r
-        start_c = (padding + w) * c
-        video_grid[:, start_r:start_r + h, start_c:start_c + w] = video[i]
-    video = []
-    for i in range(t):
-        video.append(video_grid[i])
-    imageio.mimsave(fname, video, fps=fps)
-    ## skvideo.io.vwrite(fname, video_grid, inputdict={'-r': '5'})
-    #print('saved videos to', fname)
-
-
 def comp_getattr(args, attr_name, default=None):
     if hasattr(args, attr_name):
         return getattr(args, attr_name)
@@ -177,3 +155,107 @@ def visualize_tensors(t, name=None, nest=0):
     else:
         print(t)
     return ""
+
+
+def _default_map_location(storage: "UntypedStorage", location: str) -> Optional["UntypedStorage"]:
+    if (
+        location.startswith("mps")
+        or location.startswith("cuda")
+        and not torch.cuda.device_count()
+        or location.startswith("xla")
+    ):
+        return storage.cpu()
+    return None  # default behavior by `torch.load()`
+
+
+def _load_state(
+    cls: Type[torch.nn.Module],
+    checkpoint: Dict[str, Any],
+    strict: Optional[bool] = None,
+    **cls_kwargs_new: Any,
+) -> torch.nn.Module:
+    cls_spec = inspect.getfullargspec(cls.__init__)
+    cls_init_args_name = inspect.signature(cls.__init__).parameters.keys()
+
+    self_var, args_var, kwargs_var = parse_class_init_keys(cls)
+    drop_names = [n for n in (self_var, args_var, kwargs_var) if n]
+    cls_init_args_name = list(filter(lambda n: n not in drop_names, cls_init_args_name))
+
+    cls_kwargs_loaded = {}
+    # pass in the values we saved automatically
+    if "hyper_parameters" in checkpoint:
+        # 2. Try to restore model hparams from checkpoint using the new key
+        cls_kwargs_loaded.update(checkpoint.get("hyper_parameters", {}))
+
+        # 3. Ensure that `cls_kwargs_old` has the right type, back compatibility between dict and Namespace
+        cls_kwargs_loaded = _convert_loaded_hparams(cls_kwargs_loaded, checkpoint.get("hparams_type"))
+
+        # 4. Update cls_kwargs_new with cls_kwargs_old, such that new has higher priority
+        args_name = checkpoint.get("hparams_name")
+        if args_name and args_name in cls_init_args_name:
+            cls_kwargs_loaded = {args_name: cls_kwargs_loaded}
+
+    _cls_kwargs = {}
+    _cls_kwargs.update(cls_kwargs_loaded)
+    _cls_kwargs.update(cls_kwargs_new)
+
+    if not cls_spec.varkw:
+        # filter kwargs according to class init unless it allows any argument via kwargs
+        _cls_kwargs = {k: v for k, v in _cls_kwargs.items() if k in cls_init_args_name}
+
+    obj = cls(**_cls_kwargs)
+
+    # load the state_dict on the model automatically
+    assert strict is not None
+    keys = obj.load_state_dict(checkpoint["state_dict"], strict=strict)
+
+    if not strict:
+        if keys.missing_keys:
+            #rank_zero_warn
+            print(
+                f"Found keys that are in the model state dict but not in the checkpoint: {keys.missing_keys}"
+            )
+        if keys.unexpected_keys:
+            #rank_zero_warn
+            print(
+                f"Found keys that are not in the model state dict but in the checkpoint: {keys.unexpected_keys}"
+            )
+
+    return obj
+
+
+def parse_class_init_keys(cls: Type) -> Tuple[str, Optional[str], Optional[str]]:
+    init_parameters = inspect.signature(cls.__init__).parameters
+    # docs claims the params are always ordered
+    # https://docs.python.org/3/library/inspect.html#inspect.Signature.parameters
+    init_params = list(init_parameters.values())
+    # self is always first
+    n_self = init_params[0].name
+
+    def _get_first_if_any(
+        params: List[inspect.Parameter],
+        param_type: Literal[inspect._ParameterKind.VAR_POSITIONAL, inspect._ParameterKind.VAR_KEYWORD],
+    ) -> Optional[str]:
+        for p in params:
+            if p.kind == param_type:
+                return p.name
+        return None
+
+    n_args = _get_first_if_any(init_params, inspect.Parameter.VAR_POSITIONAL)
+    n_kwargs = _get_first_if_any(init_params, inspect.Parameter.VAR_KEYWORD)
+
+    return n_self, n_args, n_kwargs
+
+
+def _convert_loaded_hparams(
+    model_args: Dict[str, Any], hparams_type: Optional[Union[Callable, str]] = None
+) -> Dict[str, Any]:
+    # if not hparams type define
+    if not hparams_type:
+        return model_args
+    # if past checkpoint loaded, convert str to callable
+    if isinstance(hparams_type, str):
+        hparams_type = Dict
+    # convert hparams
+    return hparams_type(model_args)
+

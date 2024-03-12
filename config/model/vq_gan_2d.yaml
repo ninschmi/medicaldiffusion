@@ -14,6 +14,8 @@ precision: 16
 gradient_clip_val: 1.0
 device: ''
 
+tanh_mask: False
+
 extended: False
 embedding_dim: 256
 n_codes: 2048

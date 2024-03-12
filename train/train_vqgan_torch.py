@@ -133,7 +133,8 @@ def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logg
             # ON TRAIN BATCH END - on_train_batch_end
             image_logger.log_img(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="train")
             #3D
-            video_logger.log_vid(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="train")
+            if video_logger is not None:
+                video_logger.log_vid(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="train")
 
             for cb in callbacks:
                 cb.on_train_batch_end((global_step+ 1) * num_optimizers, current_epoch)
@@ -158,7 +159,8 @@ def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logg
                 # ON VALIDATION BATCH END - on_validation_batch_end
                 image_logger.log_img(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="val")  
                 #3D
-                video_logger.log_vid(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="val")
+                if video_logger is not None:
+                    video_logger.log_vid(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="val")
 
                 # ON BATCH END
                 logger.on_val_batch_end(step=val_batch_idx+(global_step-1)*len(val_dataloader))
@@ -208,10 +210,12 @@ def run(cfg: DictConfig):
     
     # Logger
     logger = TensorBoardLogger(root_dir=cfg.model.default_root_dir)
+    has_video_logger = True
 
     # Model
     if cfg.dataset.name == 'FIVES':
         model = VQGAN2D_torch(cfg, logger)
+        has_video_logger = False
     elif cfg.dataset.name == 'MIDAS' or cfg.dataset.name == 'OPENNEURO' or cfg.dataset.name == 'ADNI':
         model = VQGAN3D_torch(cfg, logger)
     else:
@@ -243,20 +247,28 @@ def run(cfg: DictConfig):
                      save_top_k=3, mode='min', filename='val/commitment_loss/{val/commitment_loss:.2f}', logger=logger))
     callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_image_loss',
                      save_top_k=3, mode='min', filename='val/g_image_loss/{val/g_image_loss:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_video_loss',
+    if has_video_logger:
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_video_loss',
                      save_top_k=3, mode='min', filename='val/g_video_loss/{val/g_video_loss:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_mask_image_loss',
-                     save_top_k=3, mode='min', filename='val/g_mask_image_loss/{val/g_mask_image_loss:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_mask_video_loss',
-                     save_top_k=3, mode='min', filename='val/g_mask_video_loss/{val/g_mask_video_loss:.2f}', logger=logger))
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_mask_image_loss',
+                         save_top_k=3, mode='min', filename='val/g_mask_image_loss/{val/g_mask_image_loss:.2f}', logger=logger))
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_mask_video_loss',
+                         save_top_k=3, mode='min', filename='val/g_mask_video_loss/{val/g_mask_video_loss:.2f}', logger=logger))
+    else:
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_mask_loss',
+                         save_top_k=3, mode='min', filename='val/g_mask_loss/{val/g_mask_loss:.2f}', logger=logger))
     callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/image_gan_feat_loss',
                      save_top_k=3, mode='min', filename='val/image_gan_feat_loss/{val/image_gan_feat_loss:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/video_gan_feat_loss',
-                     save_top_k=3, mode='min', filename='val/video_gan_feat_loss/{val/video_gan_feat_loss:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/mask_image_gan_feat_loss',
-                     save_top_k=3, mode='min', filename='val/mask_image_gan_feat_los/{val/mask_image_gan_feat_los:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/mask_video_gan_feat_loss',
-                     save_top_k=3, mode='min', filename='val/mask_video_gan_feat_loss/{val/mask_video_gan_feat_loss:.2f}', logger=logger))
+    if has_video_logger:
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/video_gan_feat_loss',
+                         save_top_k=3, mode='min', filename='val/video_gan_feat_loss/{val/video_gan_feat_loss:.2f}', logger=logger))
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/mask_image_gan_feat_loss',
+                         save_top_k=3, mode='min', filename='val/mask_image_gan_feat_los/{val/mask_image_gan_feat_los:.2f}', logger=logger))
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/mask_video_gan_feat_loss',
+                         save_top_k=3, mode='min', filename='val/mask_video_gan_feat_loss/{val/mask_video_gan_feat_loss:.2f}', logger=logger))
+    else:
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/mask_gan_feat_loss',
+                         save_top_k=3, mode='min', filename='val/mask_gan_feat_los/{val/mask_gan_feat_los:.2f}', logger=logger))
     callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/aeloss',
                      save_top_k=3, mode='min', filename='val/aeloss/{val/aeloss:.2f}', logger=logger))
     callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/aeloss_image',
@@ -271,12 +283,16 @@ def run(cfg: DictConfig):
                      save_top_k=3, mode='min', filename='val/discloss_mask/{val/discloss_mask:.2f}', logger=logger))
     callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_image_loss',
                      save_top_k=3, mode='min', filename='val/d_image_loss/{val/d_image_loss:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_video_loss',
-                     save_top_k=3, mode='min', filename='val/d_video_loss/{val/d_video_loss:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_mask_image_loss',
-                     save_top_k=3, mode='min', filename='val/d_mask_image_loss/{val/d_mask_image_loss:.2f}', logger=logger))
-    callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_mask_video_loss',
-                 save_top_k=3, mode='min', filename='val/d_mask_video_loss/{val/d_mask_video_loss:.2f}', logger=logger))
+    if has_video_logger:
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_video_loss',
+                         save_top_k=3, mode='min', filename='val/d_video_loss/{val/d_video_loss:.2f}', logger=logger))
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_mask_image_loss',
+                         save_top_k=3, mode='min', filename='val/d_mask_image_loss/{val/d_mask_image_loss:.2f}', logger=logger))
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_mask_video_loss',
+                     save_top_k=3, mode='min', filename='val/d_mask_video_loss/{val/d_mask_video_loss:.2f}', logger=logger))
+    else:
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/d_mask_loss',
+                         save_top_k=3, mode='min', filename='val/d_mask_loss/{val/d_mask_loss:.2f}', logger=logger))
     #save at every 100 epochs
     callbacks.append(ModelCheckpoint(checkpoint=checkpoint, every_n_epochs=100, save_top_k=-1, save_last=True,
                      filename='train/{epoch}-{step}', logger=logger))
@@ -288,8 +304,11 @@ def run(cfg: DictConfig):
     #                 filename='{epoch}-{step}-10000-{train/recon_loss:.2f}', logger=logger))
     image_logger = ImageLogger(
         batch_frequency=750, model=model, save_dir=logger.log_dir, max_images=4, clamp=True)
-    video_logger = VideoLogger(
-        batch_frequency=1500, model=model, save_dir=logger.log_dir, max_videos=4, clamp=True)
+    if has_video_logger:
+        video_logger = VideoLogger(
+            batch_frequency=1500, model=model, save_dir=logger.log_dir, max_videos=4, clamp=True)
+    else:
+        video_logger = None
     
     #os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
     #os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

@@ -44,7 +44,7 @@ def get_dataset(cfg):
         train_dataset = FIVESDataset(
             root_dir=os.path.join(cfg.dataset.root_dir, "train/"), extended=cfg.model.extended)
         val_dataset = FIVESDataset(
-            root_dir=os.path.join(cfg.dataset.root_dir, "train/"), extended=cfg.model.extended)
+            root_dir=os.path.join(cfg.dataset.root_dir, "train/valid"), extended=cfg.model.extended)
         sampler = None
         return train_dataset, val_dataset, sampler
     if cfg.dataset.name == 'MIDAS':
