@@ -1,4 +1,4 @@
-"Adapted from pytorch-lightning: https://github.com/Lightning-AI/pytorch-lightning/blob/master/src/lightning/pytorch/loggers/tensorboard.py"
+"Adapted from pytorch-lightning: https://github.com/Lightning-AI/pytorch-lightning/blob/master/src/lightning/pytorch/trainer/connectors/logger_connector/result.py"
 
 from dataclasses import dataclass, is_dataclass
 from functools import partial, wraps

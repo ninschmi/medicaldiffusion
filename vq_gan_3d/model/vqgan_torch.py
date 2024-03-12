@@ -5,15 +5,24 @@ import math
 import argparse
 import numpy as np
 import pickle as pkl
+import os
+import yaml
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from vq_gan_3d.utils import shift_dim, adopt_weight, comp_getattr
+from vq_gan_3d.utils import shift_dim, adopt_weight, comp_getattr, _default_map_location, _load_state
 from vq_gan_3d.model.lpips import LPIPS
 from vq_gan_3d.model.codebook import Codebook
+
+from typing import Any, Callable, Dict, IO, Optional, Union, cast
+from pathlib import Path
+from typing_extensions import Self
+from omegaconf import OmegaConf
+from omegaconf.errors import UnsupportedValueType, ValidationError
+import contextlib
 
 def main_params(optimizer):
     for group in optimizer.param_groups:
@@ -482,6 +491,61 @@ class VQGAN3D_torch(nn.Module):
         #log['mean_org'] = batch['mean_org']
         #log['std_org'] = batch['std_org']
         return log
+    
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: Union[Union[str, Path], IO],
+        map_location: Optional[Union[Union[torch.device, str, int], Callable[[torch.UntypedStorage, str], Optional[torch.UntypedStorage]], Dict[Union[torch.device, str, int], Union[torch.device, str, int]]]] = None,
+        hparams_file: Optional[Union[str, Path]] = None,
+        strict: bool = True,
+        **kwargs: Any,
+    ) -> Self:
+        map_location = map_location or _default_map_location
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        if hparams_file is not None:
+            extension = str(hparams_file).split(".")[-1]
+            if extension.lower() in ("yml", "yaml"):
+                if not os.path.exists(hparams_file):
+                    #rank_zero_warn
+                    print(f"Missing Tags: {hparams_file}.", category=RuntimeWarning)
+                    hparams = {}
+
+                with open(hparams_file, "r") as fp:
+                    hparams = yaml.full_load(fp)
+
+                with contextlib.suppress(UnsupportedValueType, ValidationError):
+                    hparams = OmegaConf.create(hparams)
+            else:
+                raise ValueError(".yml or .yaml is required for `hparams_file`")
+
+            # overwrite hparams by the given file
+            checkpoint["hyper_parameters"] = hparams
+
+        kwargs.update({"logger": None})
+        print(f"logger is initailized as None, make sure `load_from_checkpoint()` is only called to load a pretrained models for evaluations.")
+
+        # TODO: make this a migration:
+        # for past checkpoint need to add the new key
+        checkpoint.setdefault("hyper_parameters", {})
+        # override the hparams with values that were passed in
+        checkpoint["hyper_parameters"].update(kwargs)
+
+        if issubclass(cls, nn.Module):
+            model = _load_state(cls, checkpoint, strict=strict, **kwargs)
+            state_dict = checkpoint["state_dict"]
+            if not state_dict:
+                #rank_zero_warn(
+                print(f"The state dict in {checkpoint_path!r} contains no parameters.")
+                loaded = model
+
+            device = next((t for t in state_dict.values() if isinstance(t, torch.Tensor)), torch.tensor(0)).device
+            assert isinstance(model, nn.Module)
+            loaded = model.to(device)
+        else:
+            raise NotImplementedError(f"Unsupported {cls}")
+        
+        return cast(Self, loaded)
 
 
 def Normalize(in_channels, norm_type='group', num_groups=32):

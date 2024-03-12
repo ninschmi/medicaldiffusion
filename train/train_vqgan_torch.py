@@ -130,13 +130,6 @@ def train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logg
 
             model.training_step(batch, current_epoch, global_step)
 
-            #if global_step % 3000 == 0:
-            #    torch.save()
-            #    filename='{epoch}-{step}-{train/recon_loss:.2#f}'
-            #    checkpoint = self._checkpoint_connector.dump_checkpoint(weights_only)
-            #    self.strategy.save_checkpoint(checkpoint, filepath, storage_options=storage_options)
-            #    self.strategy.barrier("Trainer.save_checkpoint")
-
             # ON TRAIN BATCH END - on_train_batch_end
             image_logger.log_img(batch, batch_idx, (global_step + 1) * num_optimizers, current_epoch, split="train")
             #3D
@@ -223,8 +216,6 @@ def run(cfg: DictConfig):
         model = VQGAN3D_torch(cfg, logger)
     else:
         model = VQGAN3D(cfg)
-        #video_logger = VideoLogger(
-        #    batch_frequency=1500, model=model, save_dir=logger.log_dir,max_videos=4, clamp=True)
 
     train_status = 0
 
@@ -489,11 +480,16 @@ def run(cfg: DictConfig):
     # Explicitly specify the process group backend if you choose to
     #ddp = DDPStrategy(process_group_backend="gloo", find_unused_parameters=True)
     #on_train_batch_start()
-    #ckpt_path=ckpt
-    #callbacks=callbacks
     # accumulate_grad_batches=cfg.model.accumulate_grad_batches
 
     try:    
+        #self.state.fn = TrainerFn.FITTING
+        #self.state.status = TrainerStatus.RUNNING
+        #self.training = True 
+
+        #assert self.state.fn is not None
+        ckpt = cfg.model.resume_from_checkpoint #parse ckpt currently not supported
+
         # clean hparams
         if hasattr(model, "hparams"):
             """Removes all unpicklable entries from hparams."""
@@ -501,6 +497,14 @@ def run(cfg: DictConfig):
             for k in del_attrs:
                 print(f"attribute '{k}' removed from hparams because it cannot be pickled")
                 del model.hparams[k]
+
+        if ckpt:
+            ## check if we should delay restoring checkpoint till later, currently set to False (depends on strategy deployed)
+            #if not self.strategy.restore_checkpoint_after_setup:
+            print(f"restoring module and callbacks from checkpoint path: {ckpt}")
+            #restore_modules_and_callbacks
+            checkpoint._restore_modules_and_callbacks(ckpt)
+
 
         # save hyperparameters
         current_frame = inspect.currentframe()
@@ -553,8 +557,14 @@ def run(cfg: DictConfig):
         if hparams_initial is not None:
             logger.log_hyperparams(hparams_initial)
         logger.save()
-                
-        # wait for all to join if on distributed
+
+        if ckpt: 
+            # restore optimizers, etc.
+            print(f"restoring training state")
+            checkpoint.restore_training_state()
+            checkpoint.resume_end()
+
+         # wait for all to join if on distributed
         if num_processes > 1:
             assert torch.distributed.is_available() and torch.distributed.is_initialized()
 
@@ -563,10 +573,7 @@ def run(cfg: DictConfig):
             else:
                 torch.distributed.barrier()
 
-        ckpt = cfg.model.resume_from_checkpoint
-
-
-        
+        # RUN THE TRAINING
         train_model(cfg, model, train_dataloader, val_dataloader, logger, image_logger, video_logger, device, callbacks)
 
         #teardown and post-training clean up
@@ -603,6 +610,9 @@ def run(cfg: DictConfig):
         logger.finalize("success")
 
         train_status = 2
+
+        #assert self.state.stopped
+        #self.training = False
 
     ## TODO: Unify both exceptions below, where `KeyboardError` doesn't re-raise
     except KeyboardInterrupt as exception:
@@ -643,66 +653,9 @@ def run(cfg: DictConfig):
         #else:
         #    torch.distributed.barrier()
 
-        ## check if we should delay restoring checkpoint till later
-        #if not self.strategy.restore_checkpoint_after_setup:
-        #    # restoring module and callbacks from checkpoint path: {ckpt_path}")
-        #    self._checkpoint_connector._restore_modules_and_callbacks(ckpt_path)
-
-        # configuring model
-        #call._call_configure_model(self)
-
-        # reset logger connector
-        #self._logger_connector.reset_results()
-        #self._logger_connector.reset_metrics()
-        # in here: logged_metrics = {}
-#
-#
-    ##TODO save hyperparameters
-    #pl_module = trainer.lightning_module
-    #datamodule_log_hyperparams = trainer.datamodule._log_hyperparams if trainer.datamodule is not None else False
-#
-    #hparams_initial = None
-    #if pl_module._log_hyperparams and datamodule_log_hyperparams:
-    #    datamodule_hparams = trainer.datamodule.hparams_initial
-    #    lightning_hparams = pl_module.hparams_initial
-    #    inconsistent_keys = []
-    #    for key in lightning_hparams.keys() & datamodule_hparams.keys():
-    #        lm_val, dm_val = lightning_hparams[key], datamodule_hparams[key]
-    #        if (
-    #            type(lm_val) != type(dm_val)
-    #            or (isinstance(lm_val, Tensor) and id(lm_val) != id(dm_val))
-    #            or lm_val != dm_val
-    #        ):
-    #            inconsistent_keys.append(key)
-    #    if inconsistent_keys:
-    #        raise RuntimeError(
-    #            f"Error while merging hparams: the keys {inconsistent_keys} are present "
-    #            "in both the LightningModule's and LightningDataModule's hparams "
-    #            "but have different values."
-    #        )
-    #    hparams_initial = {**lightning_hparams, **datamodule_hparams}
-    #elif pl_module._log_hyperparams:
-    #    hparams_initial = pl_module.hparams_initial
-    #elif datamodule_log_hyperparams:
-    #    hparams_initial = trainer.datamodule.hparams_initial
-#
-    #if hparams_initial is not None:
-    #    logger.log_hyperparams(hparams_initial)
-    #logger.save()
-
-
-
-        #if self.strategy.restore_checkpoint_after_setup:
-        #    # restoring module and callbacks from checkpoint path: {ckpt_path}"
-        #    self._checkpoint_connector._restore_modules_and_callbacks(ckpt_path)
-
-        # restore optimizers, etc.
-        # restoring training state
-        #self._checkpoint_connector.restore_training_state()
-
-        #self._checkpoint_connector.resume_end()
-
         #self._signal_connector.register_signal_handlers()
+
+        # RUN THE TRAINING
 
         #self.checkpoint_io.teardown()
 
@@ -719,25 +672,6 @@ def run(cfg: DictConfig):
         # calling teardown hooks
         #call._call_teardown_hook(self)
         #trainer.lightning_module._metric_attributes = None
-
-
-            
-# fit_impl
-        ## links data to the trainer
-        #self._data_connector.attach_data(
-        #    model, train_dataloaders=train_dataloaders, val_dataloaders=val_dataloaders, datamodule=datamodule)
-        #assert self.state.fn is not None
-        #ckpt_path = self._checkpoint_connector._select_ckpt_path(
-        #    self.state.fn,
-        #    ckpt_path,
-        #    model_provided=True,
-        #    model_connected=self.lightning_module is not None,
-        #)
-        #self._run(model, ckpt_path=ckpt_path)
-#
-        #assert self.state.stopped
-        #self.training = False
-        #return
 
     #cleanup()
 
