@@ -26,3 +26,5 @@ amp: False # turn on mixed precision
 num_sample_rows: 1
 gpus: 0
 
+extended: False
+

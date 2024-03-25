@@ -23,6 +23,8 @@ from rotary_embedding_torch import RotaryEmbedding
 from ddpm.text import tokenize, bert_embed, BERT_MODEL_DIM
 from torch.utils.data import Dataset, DataLoader
 from vq_gan_3d.model.vqgan import VQGAN3D
+from vq_gan_3d.model.vqgan_torch import VQGAN3D_torch
+from vq_gan_2d.model.vqgan_torch import VQGAN2D_torch
 
 import matplotlib.pyplot as plt
 
@@ -615,15 +617,26 @@ class GaussianDiffusion(nn.Module):
         use_dynamic_thres=False,  # from the Imagen paper
         dynamic_thres_percentile=0.9,
         vqgan_ckpt=None,
+        extended=False
     ):
         super().__init__()
         self.channels = channels
         self.image_size = image_size
         self.num_frames = num_frames
         self.denoise_fn = denoise_fn
+        self.extended = extended
 
         if vqgan_ckpt:
-            self.vqgan = VQGAN.load_from_checkpoint(vqgan_ckpt).cuda()
+            if self.extended:
+                hparams_file = vqgan_ckpt[:vqgan_ckpt.find("checkpoints", vqgan_ckpt.find("checkpoints") + 1)] + "hparams.yaml"
+                if num_frames == 1:
+                    #TODO remove later
+                    #hparams_file = '/home/oliverbr/ninschmi/medicaldiffusion/checkpoints/vq_gan/FIVES/final_extended_2d_vq_gan_w_tanh/lightning_logs/version_0/hparams.yaml'
+                    self.vqgan = VQGAN2D_torch.load_from_checkpoint(vqgan_ckpt, hparams_file=hparams_file).cuda()   #map_location={'cuda:1': 'cuda:0'}
+                else:
+                    self.vqgan = VQGAN3D_torch.load_from_checkpoint(vqgan_ckpt, hparams_file=hparams_file, map_location={'cuda:1': 'cuda:0'}).cuda()
+            else:
+                self.vqgan = VQGAN3D.load_from_checkpoint(vqgan_ckpt).cuda()
             self.vqgan.eval()
         else:
             self.vqgan = None
@@ -770,11 +783,12 @@ class GaussianDiffusion(nn.Module):
         _sample = self.p_sample_loop(
             (batch_size, channels, num_frames, image_size, image_size), cond=cond, cond_scale=cond_scale)
 
-        if isinstance(self.vqgan, VQGAN):
+        if isinstance(self.vqgan, (VQGAN3D, VQGAN3D_torch, VQGAN2D_torch)):
             # denormalize TODO: Remove eventually
             _sample = (((_sample + 1.0) / 2.0) * (self.vqgan.codebook.embeddings.max() -
                                                   self.vqgan.codebook.embeddings.min())) + self.vqgan.codebook.embeddings.min()
-
+            if isinstance(self.vqgan, (VQGAN2D_torch)):
+                _sample = _sample.squeeze(2)
             _sample = self.vqgan.decode(_sample, quantize=True)
         else:
             unnormalize_img(_sample)
@@ -808,6 +822,10 @@ class GaussianDiffusion(nn.Module):
         )
 
     def p_losses(self, x_start, t, cond=None, noise=None, **kwargs):
+        #if self.num_frames == 1:
+        #    b, c, h, w, device = *x_start.shape, x_start.device
+        #else:
+        #    b, c, f, h, w, device = *x_start.shape, x_start.device
         b, c, f, h, w, device = *x_start.shape, x_start.device
         noise = default(noise, lambda: torch.randn_like(x_start))
 
@@ -830,7 +848,7 @@ class GaussianDiffusion(nn.Module):
         return loss
 
     def forward(self, x, *args, **kwargs):
-        if isinstance(self.vqgan, VQGAN):
+        if isinstance(self.vqgan, (VQGAN3D, VQGAN3D_torch, VQGAN2D_torch)):
             with torch.no_grad():
                 x = self.vqgan.encode(
                     x, quantize=False, include_embeddings=True)
@@ -843,8 +861,12 @@ class GaussianDiffusion(nn.Module):
             x = normalize_img(x)
 
         b, device, img_size, = x.shape[0], x.device, self.image_size
-        check_shape(x, 'b c f h w', c=self.channels,
-                    f=self.num_frames, h=img_size, w=img_size)
+        if self.num_frames == 1:
+            check_shape(x, 'b c h w', c=self.channels, h=img_size, w=img_size)
+            x = x.unsqueeze(2)
+        else:
+            check_shape(x, 'b c f h w', c=self.channels,
+                        f=self.num_frames, h=img_size, w=img_size)
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
 
         return self.p_losses(x, t, *args, **kwargs)
@@ -882,6 +904,17 @@ def video_tensor_to_gif(tensor, path, duration=120, loop=0, optimize=True):
     first_img.save(path, save_all=True, append_images=rest_imgs,
                    duration=duration, loop=loop, optimize=optimize)
     return images
+
+def video_tensor_to_nifti(tensor, path):
+    import nibabel as nib
+    tensor = ((tensor - tensor.min()) / (tensor.max() - tensor.min())) * 255
+    nib.save(nib.Nifti1Image(tensor.astype('uint8'), affine=None), path)
+
+def image_tensor_to_jpg(tensor, path):
+    tensor = ((tensor - tensor.min()) / (tensor.max() - tensor.min())) * 1.0
+    image = T.ToPILImage(mode="L")(tensor)
+    image.save(path)
+    return image
 
 # gif -> (channels, frame, height, width) tensor
 
@@ -977,6 +1010,7 @@ class Trainer(object):
         num_sample_rows=1,
         max_grad_norm=None,
         num_workers=20,
+        extended=False
     ):
         super().__init__()
         self.model = diffusion_model
@@ -991,6 +1025,7 @@ class Trainer(object):
         self.image_size = diffusion_model.image_size
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_num_steps = train_num_steps
+        self.extended = extended
 
         image_size = diffusion_model.image_size
         channels = diffusion_model.channels
@@ -1109,36 +1144,78 @@ class Trainer(object):
                     num_samples = self.num_sample_rows ** 2
                     batches = num_to_groups(num_samples, self.batch_size)
 
-                    all_videos_list = list(
+                    samples = list(
                         map(lambda n: self.ema_model.sample(batch_size=n), batches))
+                    all_videos_list = [torch.unsqueeze(elem[:,0], dim=1) for elem in samples]
                     all_videos_list = torch.cat(all_videos_list, dim=0)
 
-                all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+                    if self.extended:
+                        all_mask_videos_list = [torch.unsqueeze(elem[:,1], dim=1) for elem in samples]
+                        all_mask_videos_list = torch.cat(all_mask_videos_list, dim=0)
+                        all_mask_videos_list_masked = torch.where(all_mask_videos_list < 0, torch.tensor(-1), torch.tensor(1))
 
-                one_gif = rearrange(
-                    all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
                 video_path = str(self.results_folder / str(f'{milestone}.gif'))
-                video_tensor_to_gif(one_gif, video_path)
                 log = {**log, 'sample': video_path}
 
-                # Selects one random 2D image from each 3D Image
-                B, C, D, H, W = all_videos_list.shape
-                frame_idx = torch.randint(0, D, [B]).cuda()
-                frame_idx_selected = frame_idx.reshape(
-                    -1, 1, 1, 1, 1).repeat(1, C, 1, H, W)
-                frames = torch.gather(
-                    all_videos_list, 2, frame_idx_selected).squeeze(2)
+                if isinstance(self.model.vqgan, VQGAN2D_torch):
+                    image_tensor_to_jpg(all_videos_list[0].squeeze(), video_path.replace('.gif', '.jpg'))
+                else:
+                    video_tensor_to_nifti(all_videos_list[0].permute(1, 2, 3, 0).cpu().numpy(), video_path.replace('.gif', '.nii'))
 
-                path = str(self.results_folder /
-                           f'sample-{milestone}.jpg')
-                plt.figure(figsize=(50, 50))
-                cols = 5
-                for num, frame in enumerate(frames.cpu()):
-                    plt.subplot(
-                        math.ceil(len(frames) / cols), cols, num + 1)
-                    plt.axis('off')
-                    plt.imshow(frame[0], cmap='gray')
-                    plt.savefig(path)
+                    all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+
+                    one_gif = rearrange(
+                    all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
+                    video_tensor_to_gif(one_gif, video_path)
+
+                    # Selects one random 2D image from each 3D Image
+                    B, C, D, H, W = all_videos_list.shape
+                    frame_idx = torch.randint(0, D, [B]).cuda()
+                    frame_idx_selected = frame_idx.reshape(
+                        -1, 1, 1, 1, 1).repeat(1, C, 1, H, W)
+                    frames = torch.gather(
+                        all_videos_list, 2, frame_idx_selected).squeeze(2)
+
+                    path = str(self.results_folder /
+                               f'sample-{milestone}.jpg')
+                    plt.figure(figsize=(50, 50))
+                    cols = 5
+                    for num, frame in enumerate(frames.cpu()):
+                        plt.subplot(
+                            math.ceil(len(frames) / cols), cols, num + 1)
+                        plt.axis('off')
+                        plt.imshow(frame[0], cmap='gray')
+                        plt.savefig(path)
+
+                if self.extended:
+                    mask_video_path = str(self.results_folder / str(f'{milestone}_mask.gif'))
+                    log['sample_mask'] = mask_video_path
+
+                    if isinstance(self.model.vqgan, VQGAN2D_torch):
+                        image_tensor_to_jpg(all_mask_videos_list[0].squeeze(), mask_video_path.replace('.gif', '.jpg'))
+                        #image_tensor_to_jpg(all_mask_videos_list_masked[0].squeeze(), mask_video_path.replace('.gif', '_masked.jpg'))
+                    else:
+                        video_tensor_to_nifti(all_mask_videos_list[0].permute(1, 2, 3, 0).cpu().numpy(), mask_video_path.replace('.gif', '.nii'))
+
+                        all_mask_videos_list = F.pad(all_mask_videos_list, (2, 2, 2, 2))
+
+                        one_gif_mask = rearrange(
+                        all_mask_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
+                        
+                        video_tensor_to_gif(one_gif_mask, mask_video_path)
+
+                        frames_mask = torch.gather(
+                            all_mask_videos_list, 2, frame_idx_selected).squeeze(2)
+
+                        path_mask = str(self.results_folder /
+                                   f'sample_mask-{milestone}.jpg')
+                        plt.figure(figsize=(50, 50))
+                        for num, frame in enumerate(frames_mask.cpu()):
+                            plt.subplot(
+                                math.ceil(len(frames_mask) / cols), cols, num + 1)
+                            plt.axis('off')
+                            plt.imshow(frame[0], cmap='gray')
+                            plt.savefig(path_mask)
 
                 self.save(milestone)
 

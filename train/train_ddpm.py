@@ -2,7 +2,7 @@ from re import I
 from ddpm import Unet3D, GaussianDiffusion, Trainer
 from dataset import MRNetDataset, BRATSDataset
 import argparse
-import wandb
+#import wandb
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
 from train.get_dataset import get_dataset
@@ -44,7 +44,8 @@ def run(cfg: DictConfig):
         timesteps=cfg.model.timesteps,
         # sampling_timesteps=cfg.model.sampling_timesteps,
         loss_type=cfg.model.loss_type,
-        # objective=cfg.objective
+        # objective=cfg.objective,
+        extended = cfg.model.extended
     ).cuda()
 
     train_dataset, *_ = get_dataset(cfg)
@@ -63,7 +64,8 @@ def run(cfg: DictConfig):
         num_sample_rows=cfg.model.num_sample_rows,
         results_folder=cfg.model.results_folder,
         num_workers=cfg.model.num_workers,
-        # logger=cfg.model.logger
+        # logger=cfg.model.logger,
+        extended = cfg.model.extended
     )
 
     if cfg.model.load_milestone:
