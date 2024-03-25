@@ -1,0 +1,1 @@
+from evaluation.models.segformer import Segformer

@@ -1,0 +1,12 @@
+dataset: fives
+postfix: ''
+diff_ckpt: ???
+batch_size: ???
+num_samples: 10
+
+  #- diffusion_img_size: ???
+  #- diffusion_depth_size: ???
+  #- diffusion_num_channels: ???
+  #- dim_mults: ???
+#
+  #- vqgan_ckpt: ???
