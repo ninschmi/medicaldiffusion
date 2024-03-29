@@ -247,6 +247,9 @@ def run(cfg: DictConfig):
                      save_top_k=3, mode='min', filename='val/commitment_loss/{val/commitment_loss:.2f}', logger=logger))
     callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_image_loss',
                      save_top_k=3, mode='min', filename='val/g_image_loss/{val/g_image_loss:.2f}', logger=logger))
+    if cfg.model.use_dice_loss:
+        callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/dice_loss_mask',
+                     save_top_k=3, mode='min', filename='val/dice_loss_mask/{val/dice_loss_mask:.2f}', logger=logger))
     if has_video_logger:
         callbacks.append(ModelCheckpoint(checkpoint=checkpoint, monitor='val/g_video_loss',
                      save_top_k=3, mode='min', filename='val/g_video_loss/{val/g_video_loss:.2f}', logger=logger))

@@ -23,6 +23,7 @@ from typing_extensions import Self
 from omegaconf import OmegaConf
 from omegaconf.errors import UnsupportedValueType, ValidationError
 import contextlib
+import segmentation_models_pytorch as smp
 
 def main_params(optimizer):
     for group in optimizer.param_groups:
@@ -94,6 +95,8 @@ class VQGAN2D_torch(nn.Module):
         elif cfg.model.disc_loss_type == 'hinge':
             self.disc_loss = hinge_d_loss
 
+        self.use_dice_loss = cfg.model.use_dice_loss if 'use_dice_loss' in cfg.model else False
+        self.disc_loss_weight = cfg.model.dice_loss_weight if 'dice_loss_weight' in cfg.model else None
         self.perceptual_model = LPIPS().eval()
 
         self.image_gan_weight = cfg.model.image_gan_weight
@@ -149,14 +152,24 @@ class VQGAN2D_torch(nn.Module):
         if self.extended:
             mask_recon = torch.unsqueeze(self.decoder(self.post_vq_conv(vq_output['embeddings']))[:,1], dim=1)
 
-            recon_loss_mask = F.l1_loss(mask_recon, mask) * self.l1_weight
-            recon_loss += recon_loss_mask.clone()
-        
             frames_mask = mask
-            frames_recon_mask = mask_recon
+            frames_recon_mask = torch.where(mask_recon < 0, torch.tensor(-1), torch.tensor(1)).to(mask_recon.dtype)
+
+            if self.use_dice_loss:
+                #dice_loss = smp.losses.DiceLoss(mode='binary', from_logits=True, ignore_index=-1)
+                dice_loss = smp.losses.DiceLoss(mode='binary', from_logits=True)
+                mask_dice = (mask + 1) / 2.
+                loss_mask = dice_loss(mask_recon, mask_dice.long()) * self.l1_weight * self.disc_loss_weight
+                #loss_mask = dice_loss(mask_recon, mask.long()) * self.l1_weight * self.disc_loss_weight
+                recon_loss_mask = F.l1_loss(frames_recon_mask, mask) * self.l1_weight
+            else:
+                recon_loss_mask = F.l1_loss(mask_recon, mask) * self.l1_weight
+                loss_mask = recon_loss_mask
+                
+            recon_loss += loss_mask.clone()
 
         if log_image:
-            return x, x_recon, mask, mask_recon
+            return x, x_recon, mask, mask_recon, frames_recon_mask
 
         if optimizer_idx == 0 or optimizer_idx is None:
             # Autoencoder - train the "generator"
@@ -227,6 +240,8 @@ class VQGAN2D_torch(nn.Module):
                     self.logger.log("train/recon_loss_mask", recon_loss_mask, prog_bar=True, on_step=True, on_epoch=True)
                     self.logger.log("train/aeloss_image", aeloss_image, prog_bar=True, on_step=True, on_epoch=True)
                     self.logger.log("train/aeloss_mask", aeloss_mask, prog_bar=True, on_step=True, on_epoch=True)
+                    if self.use_dice_loss:
+                        self.logger.log("train/dice_loss_mask", loss_mask, prog_bar=True, on_step=True, on_epoch=True)
                 return recon_loss, x_recon, vq_output, aeloss, perceptual_loss, gan_feat_loss
 
         if optimizer_idx == 1 or optimizer_idx is None:
@@ -242,12 +257,6 @@ class VQGAN2D_torch(nn.Module):
             discloss_image = disc_factor * \
                 (self.image_gan_weight*d_image_loss)
             discloss = discloss_image.clone()
-            if optimizer_idx == 1:
-                self.logger.log("train/logits_image_real", logits_image_real.mean().detach(), on_step=True, on_epoch=True)
-                self.logger.log("train/logits_image_fake", logits_image_fake.mean().detach(), on_step=True, on_epoch=True)
-                self.logger.log("train/d_image_loss", d_image_loss, on_step=True, on_epoch=True)
-                #TODO save discloss after discloss_mask has been added!
-                self.logger.log("train/discloss", discloss, prog_bar=True, on_step=True, on_epoch=True)
             if self.extended:
                 logits_mask_real, _ = self.mask_discriminator(frames_mask.detach())
 
@@ -258,8 +267,12 @@ class VQGAN2D_torch(nn.Module):
                 discloss_mask = disc_factor * \
                     (self.image_gan_weight*d_mask_loss)
                 discloss += discloss_mask.clone()
-
-                if optimizer_idx == 1:
+            if optimizer_idx == 1:
+                self.logger.log("train/logits_image_real", logits_image_real.mean().detach(), on_step=True, on_epoch=True)
+                self.logger.log("train/logits_image_fake", logits_image_fake.mean().detach(), on_step=True, on_epoch=True)
+                self.logger.log("train/d_image_loss", d_image_loss, on_step=True, on_epoch=True)
+                self.logger.log("train/discloss", discloss, prog_bar=True, on_step=True, on_epoch=True)
+                if self.extended:
                     self.logger.log("train/logits_mask_real", logits_mask_real.mean().detach(), on_step=True, on_epoch=True)
                     self.logger.log("train/logits_mask_fake", logits_mask_fake.mean().detach(), on_step=True, on_epoch=True)
                     self.logger.log("train/d_mask_loss", d_mask_loss, on_step=True, on_epoch=True)
@@ -272,7 +285,7 @@ class VQGAN2D_torch(nn.Module):
                 return discloss_image, None
 
         if self.extended:
-            return recon_loss, x_recon, vq_output, perceptual_loss, recon_loss_image, recon_loss_mask, perceptual_loss_image, perceptual_loss_mask, \
+            return recon_loss, x_recon, vq_output, perceptual_loss, recon_loss_image, recon_loss_mask, loss_mask, perceptual_loss_image, perceptual_loss_mask, \
                     g_image_loss, g_mask_loss, image_gan_feat_loss, mask_gan_feat_loss, \
                     aeloss, aeloss_image, aeloss_mask, discloss, discloss_image, discloss_mask, d_image_loss, d_mask_loss
         return recon_loss, x_recon, vq_output, perceptual_loss, g_image_loss, image_gan_feat_loss, aeloss, \
@@ -348,7 +361,7 @@ class VQGAN2D_torch(nn.Module):
         y = None
         if self.extended:
             y = batch['target'].to(torch.float32)
-            recon_loss, _, vq_output, perceptual_loss, recon_loss_image, recon_loss_mask, perceptual_loss_image, perceptual_loss_mask, \
+            recon_loss, _, vq_output, perceptual_loss, recon_loss_image, recon_loss_mask, loss_mask, perceptual_loss_image, perceptual_loss_mask, \
                 g_image_loss, g_mask_loss, image_gan_feat_loss, mask_gan_feat_loss, \
                 aeloss, aeloss_image, aeloss_mask, discloss, discloss_image, discloss_mask, d_image_loss, d_mask_loss = self.forward(x, y)
             self.logger.log('val/recon_loss_image', recon_loss_image, prog_bar=True)
@@ -362,6 +375,8 @@ class VQGAN2D_torch(nn.Module):
             self.logger.log("val/d_mask_loss", d_mask_loss, prog_bar=True)
             self.logger.log("val/discloss_image", discloss_image, prog_bar=True)
             self.logger.log("val/discloss_mask", discloss_mask, prog_bar=True)
+            if self.use_dice_loss:
+                self.logger.log("val/dice_loss_mask", loss_mask, prog_bar=True)
         
         else:
             recon_loss, _, vq_output, perceptual_loss, g_image_loss, image_gan_feat_loss, aeloss, \
@@ -405,12 +420,13 @@ class VQGAN2D_torch(nn.Module):
         y = None
         if self.extended:
             y = batch['target'].to(torch.float32)
-        frames, frames_rec, mask, mask_rec = self(x, y, log_image=True)
+        frames, frames_rec, mask, mask_rec, frames_recon_mask = self(x, y, log_image=True)
         log["inputs"] = frames
         log["reconstructions"] = frames_rec
-        if mask is not None and mask_rec is not None:
+        if mask is not None and mask_rec is not None and frames_recon_mask is not None:
             log["inputs_mask"] = mask
             log["reconstructions_mask"] = mask_rec
+            log["reconstructions_binary_mask"] = frames_recon_mask
         #log['mean_org'] = batch['mean_org']
         #log['std_org'] = batch['std_org']
         return log
